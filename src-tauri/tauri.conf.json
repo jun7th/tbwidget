@@ -29,6 +29,26 @@
         "focus": false,
         "focusable": true,
         "skipTaskbar": true
+      },
+      {
+        "label": "settings",
+        "title": "Taskbar Metrics Settings",
+        "url": "/?settings=1",
+        "width": 330,
+        "height": 330,
+        "minWidth": 330,
+        "maxWidth": 330,
+        "resizable": true,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": false,
+        "decorations": false,
+        "shadow": true,
+        "transparent": false,
+        "visible": false,
+        "focus": false,
+        "focusable": true,
+        "skipTaskbar": true
       }
     ],
     "security": {

@@ -28,9 +28,9 @@ Window Taskbar Widget 是一个使用 Tauri、Rust、Vue 3 和 TypeScript 开发
 - GPT 刷新间隔支持 30 秒、1 分钟、3 分钟、5 分钟和 10 分钟，默认 1 分钟。
 - 支持将组件放在任务栏左侧，或放在系统通知区域左侧。
 - 靠右显示时避让隐藏图标、网络、音量、电池和时钟等系统区域。
-- 通过系统托盘右键菜单控制显示项目、组件位置和 GPT 设置。
-- 配置保存为 JSON，GPT/Codex 请求相关错误写入日志文件。
-- 支持从托盘菜单使用 Windows 记事本打开日志。
+- 通过系统托盘右键打开紧凑设置窗口，控制显示项目、组件位置和 GPT 设置。
+- 配置保存到 SQLite，GPT/Codex 请求相关错误写入日志文件。
+- 支持从设置窗口使用 Windows 记事本打开日志。
 
 ### 开发模式运行
 
@@ -58,17 +58,17 @@ codex login
 
 Access token 只在 Rust 后端读取和使用，不会返回到 Vue，也不会写入日志。
 
-### 配置文件
+### SQLite 配置
 
-开发模式下，配置文件位于 `tbwidget` 工程根目录：
+开发模式下，配置保存在 `tbwidget` 工程根目录的 SQLite 数据库中：
 
 ```text
-widget-config.json
+widget-history.sqlite
 ```
 
-打包后，配置文件位于程序 exe 所在目录。程序启动时会读取该文件；文件不存在时会自动创建默认配置。
+打包后，数据库位于程序 exe 所在目录。程序启动时会读取数据库中的配置；配置不存在时会自动创建默认配置。
 
-配置示例：
+配置内容示例：
 
 ```json
 {
@@ -95,7 +95,7 @@ widget-config.json
 
 ### GPT 代理设置
 
-中国大陆网络环境通常无法直接访问 GPT/Codex 用量接口，需要在 `widget-config.json` 中设置可用代理，例如：
+中国大陆网络环境通常无法直接访问 GPT/Codex 用量接口，需要在设置窗口中配置可用代理；该值会保存到 SQLite，例如：
 
 ```json
 "gpt_proxy_url": "http://127.0.0.1:7890"
@@ -107,11 +107,11 @@ widget-config.json
 "gpt_proxy_url": "socks5://127.0.0.1:7890"
 ```
 
-修改代理配置后请重启程序。代理仅用于 GPT/Codex 用量请求，不影响系统资源指标采集。如果代理地址包含账号和密码，请妥善保护配置文件，避免泄露凭据。
+修改代理配置后请重启程序。代理仅用于 GPT/Codex 用量请求，不影响系统资源指标采集。如果代理地址包含账号和密码，请妥善保护数据库文件，避免泄露凭据。
 
 ### 日志
 
-日志文件与配置文件位于同一目录：
+日志文件与 SQLite 数据库位于同一目录：
 
 ```text
 widget.log
@@ -119,7 +119,7 @@ widget.log
 
 每次启动程序都会清空并重新创建日志，因此日志只保留当前运行期间的错误。
 
-可以通过托盘菜单中的“打开日志”使用 Windows 记事本查看。日志会记录 GPT 认证文件读取、代理配置、HTTP 请求、状态码和响应解析等错误，但不会记录 access token 或接口响应正文。
+可以通过设置窗口中的“打开日志”使用 Windows 记事本查看。日志会记录 GPT 认证文件读取、代理配置、HTTP 请求、状态码和响应解析等错误，但不会记录 access token 或接口响应正文。
 
 ### 开机启动
 
@@ -135,7 +135,7 @@ widget.log
 shell:startup
 ```
 
-然后把程序快捷方式复制进去。建议使用快捷方式，而不是直接复制 exe，这样程序旁边的 `widget-config.json` 和 `widget.log` 仍会保存在原程序目录。
+然后把程序快捷方式复制进去。建议使用快捷方式，而不是直接复制 exe，这样程序旁边的 `widget-history.sqlite` 和 `widget.log` 仍会保存在原程序目录。
 
 ### 注意事项
 
@@ -143,7 +143,7 @@ shell:startup
 - 靠右定位依赖 `TrayNotifyWnd`。如果 Windows 更新改变了任务栏内部结构，程序会安全回退到靠左位置，避免覆盖系统通知区域。
 - 高 DPI、多个显示器、任务栏位置变化和 Explorer 重启等场景仍需持续完善。
 - 当前只挂载到主任务栏，不处理副显示器任务栏。
-- WebView 默认关闭鼠标交互，鼠标会穿透到下方任务栏，因此组件内的项目不能直接点击；设置请使用系统托盘菜单。
+- WebView 默认关闭鼠标交互，鼠标会穿透到下方任务栏，因此组件内的项目不能直接点击；设置请通过系统托盘右键打开设置窗口。
 - 磁盘数据显示的是容量占用率，不是任务管理器中的实时磁盘活动率。
 - 网络速率会聚合系统识别到的网卡，可能包含 VPN、WSL、Hyper-V 等虚拟网卡。
 - 温度依赖系统可以提供的传感器信息，无法获取时显示 `N/A`。
@@ -185,9 +185,9 @@ The original goal is broader than a fixed resource monitor. The long-term idea i
 - GPT refresh intervals of 30 seconds, 1 minute, 3 minutes, 5 minutes, or 10 minutes; the default is 1 minute.
 - Left placement or right placement immediately before the Windows notification area.
 - Right placement avoids hidden icons, network, volume, battery, and clock areas.
-- Tray-menu controls for visible metrics, widget position, and GPT settings.
-- Persistent JSON configuration and file-based logging for GPT/Codex request errors.
-- The log can be opened with Windows Notepad from the tray menu.
+- A compact settings window opened from the tray right-click action for visible metrics, widget position, and GPT settings.
+- Persistent SQLite configuration and file-based logging for GPT/Codex request errors.
+- The log can be opened with Windows Notepad from the settings window.
 
 ### Development Startup
 
@@ -215,17 +215,17 @@ codex login
 
 The access token is read and used only by the Rust backend. It is never returned to Vue and is never written to the log.
 
-### Configuration
+### SQLite Configuration
 
-In development mode, the configuration file is stored in the `tbwidget` project root:
+In development mode, configuration is stored in the SQLite database in the `tbwidget` project root:
 
 ```text
-widget-config.json
+widget-history.sqlite
 ```
 
-In packaged builds, it is stored next to the executable. The application loads it at startup and creates a default configuration when it is missing.
+In packaged builds, the database is stored next to the executable. The application loads configuration from SQLite at startup and creates a default configuration when it is missing.
 
-Example:
+Configuration content example:
 
 ```json
 {
@@ -252,7 +252,7 @@ Available values:
 
 ### GPT Proxy
 
-Direct access to the GPT/Codex usage endpoint may be unavailable in some regions, including typical mainland China network environments. Configure a working proxy in `widget-config.json` when required:
+Direct access to the GPT/Codex usage endpoint may be unavailable in some regions, including typical mainland China network environments. Configure a working proxy in the settings window when required; the value is saved to SQLite:
 
 ```json
 "gpt_proxy_url": "http://127.0.0.1:7890"
@@ -264,11 +264,11 @@ or:
 "gpt_proxy_url": "socks5://127.0.0.1:7890"
 ```
 
-Restart the application after changing the proxy. The proxy is used only for GPT/Codex usage requests and does not affect local system metric collection. Protect the configuration file if the proxy URL contains credentials.
+Restart the application after changing the proxy. The proxy is used only for GPT/Codex usage requests and does not affect local system metric collection. Protect the database file if the proxy URL contains credentials.
 
 ### Logging
 
-The log is stored next to the configuration file:
+The log is stored next to the SQLite database:
 
 ```text
 widget.log
@@ -276,7 +276,7 @@ widget.log
 
 The log is cleared and recreated every time the application starts, so it contains errors from the current run only.
 
-Use “Open Log” in the tray menu to open it with Windows Notepad. The log covers authentication-file access, proxy configuration, HTTP requests, status codes, and response parsing. It does not contain the access token or API response body.
+Use “Open Log” in the settings window to open it with Windows Notepad. The log covers authentication-file access, proxy configuration, HTTP requests, status codes, and response parsing. It does not contain the access token or API response body.
 
 ### Start with Windows
 
@@ -292,7 +292,7 @@ Press `Win + R` and run the following command to open the folder quickly:
 shell:startup
 ```
 
-Copy the shortcut into that folder. Using a shortcut instead of copying the executable keeps `widget-config.json` and `widget.log` next to the original executable.
+Copy the shortcut into that folder. Using a shortcut instead of copying the executable keeps `widget-history.sqlite` and `widget.log` next to the original executable.
 
 ### Notes and Limitations
 
@@ -300,7 +300,7 @@ Copy the shortcut into that folder. Using a shortcut instead of copying the exec
 - Right placement depends on `TrayNotifyWnd`. If a Windows update changes this structure, the widget safely falls back to the left to avoid covering notification icons.
 - High-DPI environments, multiple monitors, taskbar layout changes, and Explorer restarts require further improvement and testing.
 - Only the primary taskbar is currently supported.
-- The WebView ignores mouse input by default, so events pass through to the taskbar below. Use the tray menu for configuration.
+- The WebView ignores mouse input by default, so events pass through to the taskbar below. Open the settings window from the tray right-click action for configuration.
 - Disk usage represents capacity utilization, not real-time disk activity from Task Manager.
 - Network rates aggregate interfaces detected by the system and may include VPN, WSL, Hyper-V, and other virtual adapters.
 - Temperature availability depends on accessible system sensors. `N/A` is shown when no valid reading is available.

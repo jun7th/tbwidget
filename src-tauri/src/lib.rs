@@ -5,21 +5,22 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sysinfo::{Components, Disks, Networks, System};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::SYSTEMTIME,
+    Foundation::{RECT, SYSTEMTIME},
     System::SystemInformation::GetLocalTime,
+    UI::WindowsAndMessaging::{MessageBoxW, SystemParametersInfoW, MB_OK, SPI_GETWORKAREA},
 };
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
-    tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager,
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition,
 };
 
 #[cfg(target_os = "windows")]
@@ -27,9 +28,12 @@ mod taskbar;
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_USAGE_PATH: &str = "/backend-api/wham/usage";
-const CONFIG_FILE_NAME: &str = "widget-config.json";
+const CODEX_RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const CODEX_RESET_CREDITS_PATH: &str = "/backend-api/wham/rate-limit-reset-credits";
 const LOG_FILE_NAME: &str = "widget.log";
+const DATABASE_FILE_NAME: &str = "widget-history.sqlite";
 const ALLOWED_GPT_REFRESH_SECONDS: [u64; 5] = [30, 60, 180, 300, 600];
+const HISTORY_WRITE_INTERVAL_SECONDS: i64 = 60;
 
 #[derive(Copy, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -82,13 +86,34 @@ impl Default for WidgetConfig {
 
 struct WidgetState {
     config: Mutex<WidgetConfig>,
-    config_path: PathBuf,
     log_path: PathBuf,
+    db_path: PathBuf,
+    system_sample_cache: Mutex<Option<CachedSystemSample>>,
+    gpt_sample_cache: Mutex<Option<CachedGptSample>>,
+    gpt_last_remaining_percent: Mutex<Option<u8>>,
+    gpt_reset_alert_pending: Mutex<bool>,
+    tray_icon: Mutex<Option<TrayIcon>>,
     system: Mutex<System>,
     components: Mutex<Components>,
     disks: Mutex<Disks>,
     networks: Mutex<Networks>,
     network_instant: Mutex<Instant>,
+}
+
+struct CachedSystemSample {
+    timestamp: i64,
+    cpu_percent: f64,
+    memory_percent: f64,
+    temperature_celsius: Option<f64>,
+    disk_percent: Option<f64>,
+    upload_bytes_per_second: f64,
+    download_bytes_per_second: f64,
+}
+
+struct CachedGptSample {
+    timestamp: i64,
+    remaining_percent: f64,
+    used_percent: f64,
 }
 
 #[derive(Serialize)]
@@ -107,24 +132,38 @@ struct CodexUsage {
     weekly_remaining_percent: Option<u8>,
 }
 
-#[derive(Clone)]
-struct TrayMenuItems {
-    position_left: CheckMenuItem<tauri::Wry>,
-    position_right: CheckMenuItem<tauri::Wry>,
-    cpu: CheckMenuItem<tauri::Wry>,
-    memory: CheckMenuItem<tauri::Wry>,
-    gpt: CheckMenuItem<tauri::Wry>,
-    gpt_remaining: CheckMenuItem<tauri::Wry>,
-    gpt_used: CheckMenuItem<tauri::Wry>,
-    temperature: CheckMenuItem<tauri::Wry>,
-    disk: CheckMenuItem<tauri::Wry>,
-    upload: CheckMenuItem<tauri::Wry>,
-    download: CheckMenuItem<tauri::Wry>,
-    refresh_30: CheckMenuItem<tauri::Wry>,
-    refresh_60: CheckMenuItem<tauri::Wry>,
-    refresh_180: CheckMenuItem<tauri::Wry>,
-    refresh_300: CheckMenuItem<tauri::Wry>,
-    refresh_600: CheckMenuItem<tauri::Wry>,
+#[derive(Serialize)]
+struct ResetCredit {
+    status: String,
+    title: String,
+    description: String,
+    expires_at: Option<String>,
+    is_supported_by_plan: bool,
+}
+
+#[derive(Serialize)]
+struct CodexResetCredits {
+    available_count: u32,
+    total_earned_count: u32,
+    credits: Vec<ResetCredit>,
+}
+
+#[derive(Serialize)]
+struct GptResetAlertState {
+    pending: bool,
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    metric: String,
+    range: String,
+}
+
+#[derive(Serialize)]
+struct HistoryPoint {
+    timestamp: i64,
+    value: f64,
+    secondary_value: Option<f64>,
 }
 
 /// 检查 GPT 刷新秒数是否属于允许值。
@@ -193,29 +232,220 @@ fn open_log_file(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("无法使用记事本打开组件日志 {}：{error}", path.display()))
 }
 
-/// 将组件配置序列化并写入配置文件。
-///
-/// # Errors
-/// 当目录创建、JSON 序列化或文件写入失败时返回中文错误信息。
-fn save_widget_config(path: &Path, config: &WidgetConfig) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("无法创建组件配置目录 {}：{error}", parent.display()))?;
-    }
-    let content = serde_json::to_string_pretty(config)
-        .map_err(|error| format!("无法序列化组件配置：{error}"))?;
-    fs::write(path, content)
-        .map_err(|error| format!("无法写入组件配置文件 {}：{error}", path.display()))
+/// 获取当前 Unix 秒级时间戳。
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
-/// 从磁盘加载组件配置，缺失或无效时保存并返回默认配置。
-/// 文件读取和默认配置写入失败时会记录中文错误并继续使用默认值。
+/// 初始化本地 SQLite 历史数据库。
+///
+/// # Errors
+/// 当数据库打开或建表失败时返回中文错误信息。
+fn init_history_database(path: &Path) -> Result<(), String> {
+    let connection = Connection::open(path)
+        .map_err(|error| format!("无法打开历史数据库 {}：{error}", path.display()))?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS system_samples (
+                timestamp INTEGER NOT NULL,
+                cpu_percent REAL NOT NULL,
+                memory_percent REAL NOT NULL,
+                temperature_celsius REAL,
+                disk_percent REAL,
+                upload_bytes_per_second REAL NOT NULL,
+                download_bytes_per_second REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS gpt_samples (
+                timestamp INTEGER NOT NULL,
+                remaining_percent REAL NOT NULL,
+                used_percent REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS widget_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                content TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_system_samples_timestamp ON system_samples(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_gpt_samples_timestamp ON gpt_samples(timestamp);",
+        )
+        .map_err(|error| format!("无法初始化历史数据库表：{error}"))?;
+    let _ = connection.execute("ALTER TABLE system_samples ADD COLUMN temperature_celsius REAL", []);
+    let _ = connection.execute("ALTER TABLE system_samples ADD COLUMN disk_percent REAL", []);
+    Ok(())
+}
+
+/// 缓存系统指标采样，并在达到写入间隔后写入 SQLite。
+fn cache_system_sample(state: &WidgetState, usage: &SystemUsage) {
+    let now = unix_timestamp();
+    let sample = CachedSystemSample {
+        timestamp: now,
+        cpu_percent: usage.cpu_percent as f64,
+        memory_percent: usage.memory_percent as f64,
+        temperature_celsius: usage.temperature_celsius.map(|value| value as f64),
+        disk_percent: usage.disk_percent.map(|value| value as f64),
+        upload_bytes_per_second: usage.upload_bytes_per_second,
+        download_bytes_per_second: usage.download_bytes_per_second,
+    };
+
+    let mut cache = match state.system_sample_cache.lock() {
+        Ok(cache) => cache,
+        Err(error) => {
+            eprintln!("无法锁定系统指标采样缓存：{error}");
+            return;
+        }
+    };
+    let should_write = cache
+        .as_ref()
+        .map(|cached| now.saturating_sub(cached.timestamp) >= HISTORY_WRITE_INTERVAL_SECONDS)
+        .unwrap_or(false);
+    if should_write {
+        flush_system_sample(&state.db_path, &cache);
+        *cache = Some(sample);
+    } else if cache.is_none() {
+        *cache = Some(sample);
+    }
+}
+
+/// 将缓存中的系统指标采样写入 SQLite。
+fn flush_system_sample(path: &Path, cache: &Option<CachedSystemSample>) {
+    let Some(sample) = cache else {
+        return;
+    };
+    let result = Connection::open(path).and_then(|connection| {
+        connection.execute(
+            "INSERT INTO system_samples (timestamp, cpu_percent, memory_percent, temperature_celsius, disk_percent, upload_bytes_per_second, download_bytes_per_second) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![sample.timestamp, sample.cpu_percent, sample.memory_percent, sample.temperature_celsius, sample.disk_percent, sample.upload_bytes_per_second, sample.download_bytes_per_second],
+        )
+    });
+    if let Err(error) = result {
+        eprintln!("写入系统指标历史采样失败：{error}");
+    }
+}
+
+/// 缓存 GPT 用量采样，并在达到写入间隔后写入 SQLite。
+fn cache_gpt_sample(state: &WidgetState, usage: &CodexUsage) {
+    let Some(remaining) = usage.weekly_remaining_percent.or(usage.primary_remaining_percent) else {
+        return;
+    };
+    let now = unix_timestamp();
+    let sample = CachedGptSample {
+        timestamp: now,
+        remaining_percent: remaining as f64,
+        used_percent: 100.0 - remaining as f64,
+    };
+
+    let mut cache = match state.gpt_sample_cache.lock() {
+        Ok(cache) => cache,
+        Err(error) => {
+            eprintln!("无法锁定 GPT 用量采样缓存：{error}");
+            return;
+        }
+    };
+    let should_write = cache
+        .as_ref()
+        .map(|cached| now.saturating_sub(cached.timestamp) >= HISTORY_WRITE_INTERVAL_SECONDS)
+        .unwrap_or(false);
+    if should_write {
+        flush_gpt_sample(&state.db_path, &cache);
+        *cache = Some(sample);
+    } else if cache.is_none() {
+        *cache = Some(sample);
+    }
+}
+
+/// 将缓存中的 GPT 用量采样写入 SQLite。
+fn flush_gpt_sample(path: &Path, cache: &Option<CachedGptSample>) {
+    let Some(sample) = cache else {
+        return;
+    };
+    let result = Connection::open(path).and_then(|connection| {
+        connection.execute(
+            "INSERT INTO gpt_samples (timestamp, remaining_percent, used_percent) VALUES (?1, ?2, ?3)",
+            params![sample.timestamp, sample.remaining_percent, sample.used_percent],
+        )
+    });
+    if let Err(error) = result {
+        eprintln!("写入 GPT 用量历史采样失败：{error}");
+    }
+}
+
+/// 根据 GPT 剩余额度变化判断是否需要触发重置提醒。
+fn update_gpt_reset_alert(state: &WidgetState, usage: &CodexUsage) {
+    let Some(remaining) = usage.weekly_remaining_percent.or(usage.primary_remaining_percent) else {
+        return;
+    };
+    let mut last_remaining = match state.gpt_last_remaining_percent.lock() {
+        Ok(last_remaining) => last_remaining,
+        Err(error) => {
+            eprintln!("无法锁定 GPT 上次余量状态：{error}");
+            return;
+        }
+    };
+    let should_alert = last_remaining
+        .map(|last| last < 100 && remaining == 100)
+        .unwrap_or(false);
+    *last_remaining = Some(remaining);
+    drop(last_remaining);
+
+    if should_alert {
+        match state.gpt_reset_alert_pending.lock() {
+            Ok(mut pending) => *pending = true,
+            Err(error) => eprintln!("无法锁定 GPT 重置提醒状态：{error}"),
+        }
+    }
+}
+
+/// 根据代理配置创建 GPT 请求客户端。
+///
+/// # Errors
+/// 当代理地址无效或客户端创建失败时返回中文错误信息。
+fn build_codex_client(proxy_url: &str) -> Result<reqwest::Client, String> {
+    let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+    if !proxy_url.is_empty() {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|_| "GPT 代理地址无效，请检查 SQLite 配置中的 gpt_proxy_url".to_string())?;
+        client_builder = client_builder.proxy(proxy);
+    }
+    client_builder
+        .build()
+        .map_err(|error| format!("无法创建 Codex 请求客户端：{error}"))
+}
+
+/// 将组件配置序列化并写入 SQLite。
+///
+/// # Errors
+/// 当数据库打开、JSON 序列化或配置写入失败时返回中文错误信息。
+fn save_widget_config(path: &Path, config: &WidgetConfig) -> Result<(), String> {
+    let content = serde_json::to_string(config)
+        .map_err(|error| format!("无法序列化组件配置：{error}"))?;
+    let connection = Connection::open(path)
+        .map_err(|error| format!("无法打开配置数据库 {}：{error}", path.display()))?;
+    connection
+        .execute(
+            "INSERT INTO widget_config (id, content) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET content = excluded.content",
+            params![content],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("无法写入 SQLite 组件配置：{error}"))
+}
+
+/// 从 SQLite 加载组件配置，缺失或无效时保存并返回默认配置。
 fn load_widget_config(path: &Path) -> WidgetConfig {
-    match fs::read_to_string(path) {
+    let load_result = Connection::open(path).and_then(|connection| {
+        connection.query_row(
+            "SELECT content FROM widget_config WHERE id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+    });
+
+    match load_result {
         Ok(content) => match serde_json::from_str::<WidgetConfig>(&content) {
             Ok(config) if is_valid_refresh_seconds(config.gpt_refresh_seconds) => config,
             Ok(_) => {
-                eprintln!("组件配置中的 GPT 刷新间隔无效，将恢复默认配置");
+                eprintln!("SQLite 组件配置中的 GPT 刷新间隔无效，将恢复默认配置");
                 let config = WidgetConfig::default();
                 if let Err(error) = save_widget_config(path, &config) {
                     eprintln!("保存默认组件配置失败：{error}");
@@ -223,7 +453,7 @@ fn load_widget_config(path: &Path) -> WidgetConfig {
                 config
             }
             Err(error) => {
-                eprintln!("组件配置文件无效，将恢复默认配置：{error}");
+                eprintln!("SQLite 组件配置无效，将恢复默认配置：{error}");
                 let config = WidgetConfig::default();
                 if let Err(save_error) = save_widget_config(path, &config) {
                     eprintln!("保存默认组件配置失败：{save_error}");
@@ -231,15 +461,15 @@ fn load_widget_config(path: &Path) -> WidgetConfig {
                 config
             }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
             let config = WidgetConfig::default();
             if let Err(save_error) = save_widget_config(path, &config) {
-                eprintln!("创建默认组件配置失败：{save_error}");
+                eprintln!("创建默认 SQLite 组件配置失败：{save_error}");
             }
             config
         }
         Err(error) => {
-            eprintln!("读取组件配置文件失败，将恢复默认配置：{error}");
+            eprintln!("读取 SQLite 组件配置失败，将恢复默认配置：{error}");
             let config = WidgetConfig::default();
             if let Err(save_error) = save_widget_config(path, &config) {
                 eprintln!("保存默认组件配置失败：{save_error}");
@@ -288,6 +518,76 @@ fn get_widget_config(state: tauri::State<'_, WidgetState>) -> Result<WidgetConfi
         .lock()
         .map(|config| config.clone())
         .map_err(|error| format!("无法锁定组件配置状态：{error}"))
+}
+
+/// 保存设置窗口提交的组件配置，并广播给任务栏组件。
+///
+/// # Errors
+/// 当配置值无效、状态锁定、文件写入或事件发送失败时返回中文错误信息。
+#[tauri::command]
+fn save_widget_settings(
+    app: AppHandle,
+    state: tauri::State<'_, WidgetState>,
+    config: WidgetConfig,
+) -> Result<WidgetConfig, String> {
+    if !is_valid_refresh_seconds(config.gpt_refresh_seconds) {
+        return Err("GPT 刷新间隔无效".to_string());
+    }
+    {
+        let mut current = state
+            .config
+            .lock()
+            .map_err(|error| format!("无法锁定组件配置状态：{error}"))?;
+        *current = config.clone();
+    }
+    save_widget_config(&state.db_path, &config)?;
+    app.emit("widget-config-changed", &config)
+        .map_err(|error| format!("发送组件配置变更事件失败：{error}"))?;
+    Ok(config)
+}
+
+/// 隐藏设置窗口。
+///
+/// # Errors
+/// 当找不到窗口或隐藏失败时返回中文错误信息。
+#[tauri::command]
+fn hide_settings_window(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("settings")
+        .ok_or_else(|| "找不到 settings 设置窗口".to_string())?;
+    window
+        .hide()
+        .map_err(|error| format!("无法隐藏设置窗口：{error}"))
+}
+
+/// 根据设置面板内容自动调整设置窗口高度。
+///
+/// # Errors
+/// 当找不到窗口或调整窗口失败时返回中文错误信息。
+#[tauri::command]
+fn resize_settings_window(app: AppHandle, height: f64) -> Result<(), String> {
+    let window = app
+        .get_webview_window("settings")
+        .ok_or_else(|| "找不到 settings 设置窗口".to_string())?;
+
+    let next_height = height.round().clamp(120.0, 560.0);
+
+    let current_size = window
+        .inner_size()
+        .map_err(|error| format!("无法获取窗口尺寸：{error}"))?;
+
+    let scale_factor = window
+        .scale_factor()
+        .map_err(|error| format!("无法获取缩放比例：{error}"))?;
+
+    let current_width = current_size.width as f64 / scale_factor;
+
+    window
+        .set_size(LogicalSize::new(current_width, next_height))
+        .map_err(|error| format!("无法调整设置窗口尺寸：{error}"))?;
+
+    position_settings_window(&window);
+    Ok(())
 }
 
 /// 获取当前系统资源、磁盘、温度和网络速率。
@@ -353,14 +653,16 @@ fn get_system_usage(state: tauri::State<'_, WidgetState>) -> Result<SystemUsage,
     let upload_bytes: u64 = networks.iter().map(|(_, network)| network.transmitted()).sum();
     *network_instant = Instant::now();
 
-    Ok(SystemUsage {
+    let usage = SystemUsage {
         cpu_percent,
         memory_percent,
         temperature_celsius,
         disk_percent,
         upload_bytes_per_second: upload_bytes as f64 / elapsed_seconds,
         download_bytes_per_second: download_bytes as f64 / elapsed_seconds,
-    })
+    };
+    cache_system_sample(state.inner(), &usage);
+    Ok(usage)
 }
 
 /// 打开 Windows 任务管理器。
@@ -495,15 +797,7 @@ async fn get_codex_usage(state: tauri::State<'_, WidgetState>) -> Result<CodexUs
     };
     let result = async {
         let access_token = load_codex_access_token()?;
-        let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
-        if !proxy_url.is_empty() {
-            let proxy = reqwest::Proxy::all(&proxy_url)
-                .map_err(|_| "GPT 代理地址无效，请检查 widget-config.json 中的 gpt_proxy_url".to_string())?;
-            client_builder = client_builder.proxy(proxy);
-        }
-        let client = client_builder
-            .build()
-            .map_err(|error| format!("无法创建 Codex 用量请求客户端：{error}"))?;
+        let client = build_codex_client(&proxy_url)?;
 
         let response = client
             .get(CODEX_USAGE_URL)
@@ -560,207 +854,415 @@ async fn get_codex_usage(state: tauri::State<'_, WidgetState>) -> Result<CodexUs
     if let Err(error) = &result {
         append_error_log(&state.log_path, &format!("GPT 用量读取失败：{error}"));
     }
+    if let Ok(usage) = &result {
+        update_gpt_reset_alert(state.inner(), usage);
+        cache_gpt_sample(state.inner(), usage);
+    }
     result
 }
 
-/// 将当前配置同步到所有托盘复选菜单项。
-fn sync_tray_checks(items: &TrayMenuItems, config: &WidgetConfig) {
-    let checks = [
-        (&items.position_left, config.position == WidgetPosition::Left, "靠左"),
-        (&items.position_right, config.position == WidgetPosition::Right, "靠右"),
-        (&items.cpu, config.cpu_visible, "CPU"),
-        (&items.memory, config.memory_visible, "内存"),
-        (&items.gpt, config.gpt_visible, "GPT"),
-        (&items.gpt_remaining, config.gpt_display_mode == GptDisplayMode::Remaining, "GPT 余量"),
-        (&items.gpt_used, config.gpt_display_mode == GptDisplayMode::Used, "GPT 用量"),
-        (&items.temperature, config.temperature_visible, "温度"),
-        (&items.disk, config.disk_visible, "磁盘"),
-        (&items.upload, config.upload_visible, "上行流量"),
-        (&items.download, config.download_visible, "下行流量"),
-        (&items.refresh_30, config.gpt_refresh_seconds == 30, "30秒"),
-        (&items.refresh_60, config.gpt_refresh_seconds == 60, "1分钟"),
-        (&items.refresh_180, config.gpt_refresh_seconds == 180, "3分钟"),
-        (&items.refresh_300, config.gpt_refresh_seconds == 300, "5分钟"),
-        (&items.refresh_600, config.gpt_refresh_seconds == 600, "10分钟"),
-    ];
-    for (item, checked, label) in checks {
-        if let Err(error) = item.set_checked(checked) {
-            eprintln!("设置托盘菜单“{label}”勾选状态失败：{error}");
-        }
-    }
-}
-
-/// 处理托盘菜单操作并持久化、广播更新后的配置。
-fn handle_tray_menu_event(app: &AppHandle, items: &TrayMenuItems, event: MenuEvent) {
-    let id = event.id().as_ref();
-    if id == "quit" {
-        app.exit(0);
-        return;
-    }
-
-    let state = app.state::<WidgetState>();
-    if id == "open_log" {
-        if let Err(error) = open_log_file(&state.log_path) {
-            append_error_log(&state.log_path, &error);
-            eprintln!("{error}");
-        }
-        return;
-    }
-    let config = {
-        let mut config = match state.config.lock() {
-            Ok(config) => config,
-            Err(error) => {
-                eprintln!("托盘操作无法锁定组件配置状态：{error}");
-                return;
-            }
-        };
-        match id {
-            "position_left" => config.position = WidgetPosition::Left,
-            "position_right" => config.position = WidgetPosition::Right,
-            "cpu_visible" => config.cpu_visible = !config.cpu_visible,
-            "memory_visible" => config.memory_visible = !config.memory_visible,
-            "gpt_visible" => config.gpt_visible = !config.gpt_visible,
-            "gpt_display_remaining" => config.gpt_display_mode = GptDisplayMode::Remaining,
-            "gpt_display_used" => config.gpt_display_mode = GptDisplayMode::Used,
-            "temperature_visible" => config.temperature_visible = !config.temperature_visible,
-            "disk_visible" => config.disk_visible = !config.disk_visible,
-            "upload_visible" => config.upload_visible = !config.upload_visible,
-            "download_visible" => config.download_visible = !config.download_visible,
-            "refresh_30" => config.gpt_refresh_seconds = 30,
-            "refresh_60" => config.gpt_refresh_seconds = 60,
-            "refresh_180" => config.gpt_refresh_seconds = 180,
-            "refresh_300" => config.gpt_refresh_seconds = 300,
-            "refresh_600" => config.gpt_refresh_seconds = 600,
-            _ => return,
-        }
-        config.clone()
-    };
-
-    sync_tray_checks(items, &config);
-    if let Err(error) = save_widget_config(&state.config_path, &config) {
-        eprintln!("托盘操作保存组件配置失败：{error}");
-    }
-    if let Err(error) = app.emit("widget-config-changed", &config) {
-        eprintln!("托盘操作发送组件配置变更事件失败：{error}");
-    }
-}
-
-/// 创建仅通过右键打开的系统托盘配置菜单。
+/// 请求 GPT/Codex 重置额度信息。
 ///
 /// # Errors
-/// 当菜单项、菜单、图标或托盘创建失败时返回中文错误信息。
-fn setup_tray(app: &AppHandle, config: &WidgetConfig) -> Result<(), String> {
-    let position_left = CheckMenuItem::with_id(
-        app,
-        "position_left",
-        "靠左",
-        true,
-        config.position == WidgetPosition::Left,
-        None::<&str>,
-    )
-    .map_err(|error| format!("无法创建靠左位置菜单：{error}"))?;
-    let position_right = CheckMenuItem::with_id(
-        app,
-        "position_right",
-        "靠右",
-        true,
-        config.position == WidgetPosition::Right,
-        None::<&str>,
-    )
-    .map_err(|error| format!("无法创建靠右位置菜单：{error}"))?;
-    let position_menu = Submenu::with_items(
-        app,
-        "组件位置",
-        true,
-        &[&position_left, &position_right],
-    )
-    .map_err(|error| format!("无法创建组件位置子菜单：{error}"))?;
-    let cpu = CheckMenuItem::with_id(app, "cpu_visible", "CPU", true, config.cpu_visible, None::<&str>)
-        .map_err(|error| format!("无法创建 CPU 托盘菜单：{error}"))?;
-    let memory = CheckMenuItem::with_id(app, "memory_visible", "内存", true, config.memory_visible, None::<&str>)
-        .map_err(|error| format!("无法创建内存托盘菜单：{error}"))?;
-    let gpt = CheckMenuItem::with_id(app, "gpt_visible", "GPT", true, config.gpt_visible, None::<&str>)
-        .map_err(|error| format!("无法创建 GPT 托盘菜单：{error}"))?;
-    let gpt_remaining = CheckMenuItem::with_id(
-        app,
-        "gpt_display_remaining",
-        "显示余量",
-        true,
-        config.gpt_display_mode == GptDisplayMode::Remaining,
-        None::<&str>,
-    )
-    .map_err(|error| format!("无法创建 GPT 余量显示菜单：{error}"))?;
-    let gpt_used = CheckMenuItem::with_id(
-        app,
-        "gpt_display_used",
-        "显示用量",
-        true,
-        config.gpt_display_mode == GptDisplayMode::Used,
-        None::<&str>,
-    )
-    .map_err(|error| format!("无法创建 GPT 用量显示菜单：{error}"))?;
-    let gpt_display_menu = Submenu::with_items(
-        app,
-        "GPT 显示方式",
-        true,
-        &[&gpt_remaining, &gpt_used],
-    )
-    .map_err(|error| format!("无法创建 GPT 显示方式子菜单：{error}"))?;
-    let temperature = CheckMenuItem::with_id(app, "temperature_visible", "温度", true, config.temperature_visible, None::<&str>)
-        .map_err(|error| format!("无法创建温度托盘菜单：{error}"))?;
-    let disk = CheckMenuItem::with_id(app, "disk_visible", "磁盘", true, config.disk_visible, None::<&str>)
-        .map_err(|error| format!("无法创建磁盘托盘菜单：{error}"))?;
-    let upload = CheckMenuItem::with_id(app, "upload_visible", "上行流量", true, config.upload_visible, None::<&str>)
-        .map_err(|error| format!("无法创建上行流量托盘菜单：{error}"))?;
-    let download = CheckMenuItem::with_id(app, "download_visible", "下行流量", true, config.download_visible, None::<&str>)
-        .map_err(|error| format!("无法创建下行流量托盘菜单：{error}"))?;
-    let refresh_30 = CheckMenuItem::with_id(app, "refresh_30", "30秒", true, config.gpt_refresh_seconds == 30, None::<&str>)
-        .map_err(|error| format!("无法创建 30 秒刷新菜单：{error}"))?;
-    let refresh_60 = CheckMenuItem::with_id(app, "refresh_60", "1分钟", true, config.gpt_refresh_seconds == 60, None::<&str>)
-        .map_err(|error| format!("无法创建 1 分钟刷新菜单：{error}"))?;
-    let refresh_180 = CheckMenuItem::with_id(app, "refresh_180", "3分钟", true, config.gpt_refresh_seconds == 180, None::<&str>)
-        .map_err(|error| format!("无法创建 3 分钟刷新菜单：{error}"))?;
-    let refresh_300 = CheckMenuItem::with_id(app, "refresh_300", "5分钟", true, config.gpt_refresh_seconds == 300, None::<&str>)
-        .map_err(|error| format!("无法创建 5 分钟刷新菜单：{error}"))?;
-    let refresh_600 = CheckMenuItem::with_id(app, "refresh_600", "10分钟", true, config.gpt_refresh_seconds == 600, None::<&str>)
-        .map_err(|error| format!("无法创建 10 分钟刷新菜单：{error}"))?;
-    let refresh_menu = Submenu::with_items(
-        app,
-        "GPT 刷新间隔",
-        true,
-        &[&refresh_30, &refresh_60, &refresh_180, &refresh_300, &refresh_600],
-    )
-    .map_err(|error| format!("无法创建 GPT 刷新子菜单：{error}"))?;
-    let separator = PredefinedMenuItem::separator(app)
-        .map_err(|error| format!("无法创建托盘菜单分隔线：{error}"))?;
-    let open_log = MenuItem::with_id(app, "open_log", "打开日志", true, None::<&str>)
-        .map_err(|error| format!("无法创建打开日志菜单：{error}"))?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)
-        .map_err(|error| format!("无法创建退出菜单：{error}"))?;
-    let menu = Menu::with_items(
-        app,
-        &[&cpu, &memory, &gpt, &temperature, &disk, &upload, &download, &position_menu, &gpt_display_menu, &refresh_menu, &separator, &open_log, &quit],
-    )
-    .map_err(|error| format!("无法创建托盘菜单：{error}"))?;
-    let items = TrayMenuItems {
-        position_left,
-        position_right,
-        cpu,
-        memory,
-        gpt,
-        gpt_remaining,
-        gpt_used,
-        temperature,
-        disk,
-        upload,
-        download,
-        refresh_30,
-        refresh_60,
-        refresh_180,
-        refresh_300,
-        refresh_600,
+/// 当认证、代理、HTTP 状态码或响应解析失败时返回中文错误信息。
+#[tauri::command]
+async fn get_codex_reset_credits(
+    state: tauri::State<'_, WidgetState>,
+) -> Result<CodexResetCredits, String> {
+    let proxy_url = match state.config.lock() {
+        Ok(config) => config.gpt_proxy_url.trim().to_string(),
+        Err(error) => {
+            let message = format!("无法读取 GPT 代理配置：{error}");
+            append_error_log(&state.log_path, &message);
+            return Err(message);
+        }
     };
-    let event_items = items.clone();
+    let result = async {
+        let access_token = load_codex_access_token()?;
+        let client = build_codex_client(&proxy_url)?;
+        let response = client
+            .get(CODEX_RESET_CREDITS_URL)
+            .header("Accept", "*/*")
+            .bearer_auth(access_token)
+            .header("Cache-Control", "no-cache")
+            .header("Pragma", "no-cache")
+            .header("Referer", "https://chatgpt.com/codex")
+            .header("oai-language", "en-US")
+            .header("x-openai-target-path", CODEX_RESET_CREDITS_PATH)
+            .header("x-openai-target-route", CODEX_RESET_CREDITS_PATH)
+            .send()
+            .await
+            .map_err(|error| {
+                if proxy_url.is_empty() {
+                    format!("无法请求 GPT 重置额度：{error}")
+                } else {
+                    "无法通过配置的 GPT 代理请求重置额度，请检查代理地址和代理服务状态".to_string()
+                }
+            })?;
+        let status = response.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err("Codex CLI 登录令牌已失效，请运行 codex login".to_string());
+        }
+        if !status.is_success() {
+            return Err(format!("GPT 重置额度接口请求失败，HTTP 状态码：{}", status.as_u16()));
+        }
+        let payload: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("GPT 重置额度接口返回了无效 JSON：{error}"))?;
+        let available_count = payload
+            .get("available_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let total_earned_count = payload
+            .get("total_earned_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let credits = payload
+            .get("credits")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| ResetCredit {
+                        status: item
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        title: item
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Reset credit")
+                            .to_string(),
+                        description: item
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        expires_at: item
+                            .get("expires_at")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        is_supported_by_plan: item
+                            .get("is_supported_by_plan")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(CodexResetCredits {
+            available_count,
+            total_earned_count,
+            credits,
+        })
+    }
+    .await;
+    if let Err(error) = &result {
+        append_error_log(&state.log_path, &format!("GPT 重置额度读取失败：{error}"));
+    }
+    result
+}
+
+/// 查询本地历史曲线数据。
+///
+/// # Errors
+/// 当查询参数无效、数据库打开或 SQL 查询失败时返回中文错误信息。
+#[tauri::command]
+fn get_history_points(
+    state: tauri::State<'_, WidgetState>,
+    query: HistoryQuery,
+) -> Result<Vec<HistoryPoint>, String> {
+    let seconds = match query.range.as_str() {
+        "minute" => 1800,
+        "hour" => 43200,
+        "day" => 86400,
+        _ => return Err("历史范围仅支持 minute、hour 或 day".to_string()),
+    };
+    let since = unix_timestamp().saturating_sub(seconds);
+    let connection = Connection::open(&state.db_path)
+        .map_err(|error| format!("无法打开历史数据库 {}：{error}", state.db_path.display()))?;
+    match query.metric.as_str() {
+        "cpu" => query_single_history(&connection, "cpu_percent", "system_samples", since),
+        "memory" => query_single_history(&connection, "memory_percent", "system_samples", since),
+        "temperature" => query_optional_history(&connection, "temperature_celsius", "system_samples", since),
+        "disk" => query_optional_history(&connection, "disk_percent", "system_samples", since),
+        "network" => query_network_history(&connection, since),
+        "gpt" => query_gpt_history(&connection, since),
+        _ => Err("历史指标仅支持 cpu、memory、temperature、disk、network 或 gpt".to_string()),
+    }
+}
+
+/// 查询单值历史曲线。
+///
+/// # Errors
+/// 当 SQL 查询失败时返回中文错误信息。
+fn query_single_history(
+    connection: &Connection,
+    column: &str,
+    table: &str,
+    since: i64,
+) -> Result<Vec<HistoryPoint>, String> {
+    let sql = format!("SELECT timestamp, COALESCE({column}, 0) FROM {table} WHERE timestamp >= ?1 ORDER BY timestamp ASC");
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("无法准备历史查询：{error}"))?;
+    let rows = statement
+        .query_map(params![since], |row| {
+            Ok(HistoryPoint {
+                timestamp: row.get(0)?,
+                value: row.get(1)?,
+                secondary_value: None,
+            })
+        })
+        .map_err(|error| format!("无法查询历史数据：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法读取历史数据行：{error}"))
+}
+
+/// 查询可为空的单值历史曲线。
+///
+/// # Errors
+/// 当 SQL 查询失败时返回中文错误信息。
+fn query_optional_history(
+    connection: &Connection,
+    column: &str,
+    table: &str,
+    since: i64,
+) -> Result<Vec<HistoryPoint>, String> {
+    let sql = format!("SELECT timestamp, {column} FROM {table} WHERE timestamp >= ?1 AND {column} IS NOT NULL ORDER BY timestamp ASC");
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("无法准备可选历史查询：{error}"))?;
+    let rows = statement
+        .query_map(params![since], |row| {
+            Ok(HistoryPoint {
+                timestamp: row.get(0)?,
+                value: row.get(1)?,
+                secondary_value: None,
+            })
+        })
+        .map_err(|error| format!("无法查询可选历史数据：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法读取可选历史数据行：{error}"))
+}
+
+/// 查询网络上下行双线历史曲线。
+///
+/// # Errors
+/// 当 SQL 查询失败时返回中文错误信息。
+fn query_network_history(connection: &Connection, since: i64) -> Result<Vec<HistoryPoint>, String> {
+    let mut statement = connection
+        .prepare("SELECT timestamp, upload_bytes_per_second, download_bytes_per_second FROM system_samples WHERE timestamp >= ?1 ORDER BY timestamp ASC")
+        .map_err(|error| format!("无法准备网络历史查询：{error}"))?;
+    let rows = statement
+        .query_map(params![since], |row| {
+            Ok(HistoryPoint {
+                timestamp: row.get(0)?,
+                value: row.get(1)?,
+                secondary_value: Some(row.get(2)?),
+            })
+        })
+        .map_err(|error| format!("无法查询网络历史数据：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法读取网络历史数据行：{error}"))
+}
+
+/// 查询 GPT 已用和余量双值历史曲线。
+///
+/// # Errors
+/// 当 SQL 查询失败时返回中文错误信息。
+fn query_gpt_history(connection: &Connection, since: i64) -> Result<Vec<HistoryPoint>, String> {
+    let mut statement = connection
+        .prepare("SELECT timestamp, used_percent, remaining_percent FROM gpt_samples WHERE timestamp >= ?1 ORDER BY timestamp ASC")
+        .map_err(|error| format!("无法准备 GPT 历史查询：{error}"))?;
+    let rows = statement
+        .query_map(params![since], |row| {
+            Ok(HistoryPoint {
+                timestamp: row.get(0)?,
+                value: row.get(1)?,
+                secondary_value: Some(row.get(2)?),
+            })
+        })
+        .map_err(|error| format!("无法查询 GPT 历史数据：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法读取 GPT 历史数据行：{error}"))
+}
+
+/// 将设置窗口移动到 Windows 工作区右下角。
+#[cfg(target_os = "windows")]
+fn position_settings_window(window: &tauri::WebviewWindow) {
+    let window_size = match window.outer_size() {
+        Ok(size) => size,
+        Err(error) => {
+            eprintln!("无法读取设置窗口尺寸，设置窗口将使用默认位置：{error}");
+            return;
+        }
+    };
+    let mut work_area = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut work_area as *mut RECT as *mut _,
+            0,
+        )
+    };
+    if ok == 0 || work_area.right <= work_area.left || work_area.bottom <= work_area.top {
+        eprintln!("无法获取 Windows 工作区，设置窗口将使用默认位置");
+        return;
+    }
+    let margin = 8_i32;
+    let x = work_area
+        .right
+        .saturating_sub(window_size.width as i32)
+        .saturating_sub(margin);
+    let y = work_area
+        .bottom
+        .saturating_sub(window_size.height as i32)
+        .saturating_sub(margin);
+    if let Err(error) = window.set_position(PhysicalPosition::new(x, y)) {
+        eprintln!("无法移动设置窗口到右下角：{error}");
+    }
+}
+
+/// 将非 Windows 设置窗口保留在默认位置。
+#[cfg(not(target_os = "windows"))]
+fn position_settings_window(_window: &tauri::WebviewWindow) {}
+
+/// 显示设置窗口并让它获得焦点。
+fn show_settings_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("settings") else {
+        eprintln!("找不到 settings 设置窗口");
+        return;
+    };
+    position_settings_window(&window);
+    if let Err(error) = window.show() {
+        eprintln!("无法显示设置窗口：{error}");
+    }
+    if let Err(error) = window.set_focus() {
+        eprintln!("无法聚焦设置窗口：{error}");
+    }
+}
+
+/// 查询 GPT 重置提醒是否待处理。
+///
+/// # Errors
+/// 当提醒状态锁定失败时返回中文错误信息。
+#[tauri::command]
+fn get_gpt_reset_alert_state(state: tauri::State<'_, WidgetState>) -> Result<GptResetAlertState, String> {
+    state
+        .gpt_reset_alert_pending
+        .lock()
+        .map(|pending| GptResetAlertState { pending: *pending })
+        .map_err(|error| format!("无法锁定 GPT 重置提醒状态：{error}"))
+}
+
+/// 切换托盘图标显示，用于前端定时驱动闪烁效果。
+///
+/// # Errors
+/// 当托盘图标状态锁定或图标设置失败时返回中文错误信息。
+#[tauri::command]
+fn set_tray_flash_visible(app: AppHandle, state: tauri::State<'_, WidgetState>, visible: bool) -> Result<(), String> {
+    let tray_icon = state
+        .tray_icon
+        .lock()
+        .map_err(|error| format!("无法锁定托盘图标状态：{error}"))?;
+    let Some(tray_icon) = tray_icon.as_ref() else {
+        return Ok(());
+    };
+    if visible {
+        let icon = app
+            .default_window_icon()
+            .cloned()
+            .ok_or_else(|| "无法获取默认托盘图标".to_string())?;
+        tray_icon
+            .set_icon(Some(icon))
+            .map_err(|error| format!("无法恢复托盘图标：{error}"))?;
+    } else {
+        tray_icon
+            .set_icon(None)
+            .map_err(|error| format!("无法隐藏托盘图标形成闪烁：{error}"))?;
+    }
+    Ok(())
+}
+
+/// 确认 GPT 重置提醒，停止重复提醒并弹出系统提示。
+///
+/// # Errors
+/// 当提醒状态锁定失败时返回中文错误信息。
+#[tauri::command]
+fn acknowledge_gpt_reset_alert(state: tauri::State<'_, WidgetState>) -> Result<(), String> {
+    acknowledge_gpt_reset_alert_inner(state.inner())
+}
+
+/// 确认 GPT 重置提醒的内部实现，供命令和托盘事件共用。
+///
+/// # Errors
+/// 当提醒状态锁定失败时返回中文错误信息。
+fn acknowledge_gpt_reset_alert_inner(state: &WidgetState) -> Result<(), String> {
+    let mut pending = state
+        .gpt_reset_alert_pending
+        .lock()
+        .map_err(|error| format!("无法锁定 GPT 重置提醒状态：{error}"))?;
+    if *pending {
+        *pending = false;
+        drop(pending);
+        show_gpt_reset_message();
+    }
+    Ok(())
+}
+
+/// 弹出 GPT 用量重置提示。
+///
+/// # Returns
+/// 无返回值。
+#[cfg(target_os = "windows")]
+fn show_gpt_reset_message() {
+    let title: Vec<u16> = "GPT 提醒\0".encode_utf16().collect();
+    let message: Vec<u16> = "GPT 用量已重置\0".encode_utf16().collect();
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), message.as_ptr(), title.as_ptr(), MB_OK);
+    }
+}
+
+/// 非 Windows 环境不弹出系统提示。
+///
+/// # Returns
+/// 无返回值。
+#[cfg(not(target_os = "windows"))]
+fn show_gpt_reset_message() {}
+
+/// 打开组件日志文件。
+///
+/// # Errors
+/// 当日志文件创建或记事本启动失败时返回中文错误信息。
+#[tauri::command]
+fn open_widget_log(state: tauri::State<'_, WidgetState>) -> Result<(), String> {
+    if let Err(error) = open_log_file(&state.log_path) {
+        append_error_log(&state.log_path, &error);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// 退出整个组件应用。
+#[tauri::command]
+fn quit_application(app: AppHandle) {
+    app.exit(0);
+}
+
+/// 创建右键直接打开设置窗口的系统托盘图标。
+///
+/// # Errors
+/// 当图标或托盘创建失败时返回中文错误信息。
+fn setup_tray(app: &AppHandle, _config: &WidgetConfig) -> Result<TrayIcon, String> {
     let icon = app
         .default_window_icon()
         .cloned()
@@ -768,15 +1270,34 @@ fn setup_tray(app: &AppHandle, config: &WidgetConfig) -> Result<(), String> {
 
     TrayIconBuilder::new()
         .icon(icon)
-        .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(move |app, event| handle_tray_menu_event(app, &event_items, event))
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button, button_state, .. } = event {
+                if button_state != MouseButtonState::Up {
+                    return;
+                }
+                let app_handle = tray.app_handle();
+                let has_alert = app_handle
+                    .state::<WidgetState>()
+                    .gpt_reset_alert_pending
+                    .lock()
+                    .map(|pending| *pending)
+                    .unwrap_or(false);
+                if has_alert {
+                    let state = app_handle.state::<WidgetState>();
+                    if let Err(error) = acknowledge_gpt_reset_alert_inner(state.inner()) {
+                        eprintln!("确认 GPT 重置提醒失败：{error}");
+                    }
+                } else if button == MouseButton::Right {
+                    show_settings_window(app_handle);
+                }
+            }
+        })
         .build(app)
-        .map_err(|error| format!("无法创建系统托盘图标：{error}"))?;
-    Ok(())
+        .map_err(|error| format!("无法创建系统托盘图标：{error}"))
 }
 
-/// 获取配置和日志使用的运行目录。
+/// 获取数据库和日志使用的运行目录。
 /// 开发模式使用 tbwidget 工程根目录，打包模式使用可执行文件所在目录。
 ///
 /// # Errors
@@ -797,32 +1318,42 @@ fn runtime_data_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| format!("当前可执行文件没有父目录：{}", executable_path.display()))
 }
 
-/// 初始化配置、日志、持久采样器和系统托盘。
+/// 初始化 SQLite 配置、日志、持久采样器和系统托盘。
 ///
 /// # Errors
-/// 当运行目录、日志文件、配置文件或托盘创建失败时返回错误。
+/// 当运行目录、日志文件、数据库或托盘创建失败时返回错误。
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = runtime_data_dir().map_err(std::io::Error::other)?;
-    let config_path = data_dir.join(CONFIG_FILE_NAME);
     let log_path = data_dir.join(LOG_FILE_NAME);
+    let db_path = data_dir.join(DATABASE_FILE_NAME);
     fs::write(&log_path, "").map_err(|error| {
         std::io::Error::other(format!(
             "无法在每次启动时重建组件日志文件 {}：{error}",
             log_path.display()
         ))
     })?;
-    let config = load_widget_config(&config_path);
+    init_history_database(&db_path).map_err(std::io::Error::other)?;
+    let config = load_widget_config(&db_path);
     app.manage(WidgetState {
         config: Mutex::new(config.clone()),
-        config_path,
         log_path,
+        db_path,
+        system_sample_cache: Mutex::new(None),
+        gpt_sample_cache: Mutex::new(None),
+        gpt_last_remaining_percent: Mutex::new(None),
+        gpt_reset_alert_pending: Mutex::new(false),
+        tray_icon: Mutex::new(None),
         system: Mutex::new(System::new_all()),
         components: Mutex::new(Components::new_with_refreshed_list()),
         disks: Mutex::new(Disks::new_with_refreshed_list()),
         networks: Mutex::new(Networks::new_with_refreshed_list()),
         network_instant: Mutex::new(Instant::now()),
     });
-    setup_tray(app.handle(), &config).map_err(std::io::Error::other)?;
+    let tray_icon = setup_tray(app.handle(), &config).map_err(std::io::Error::other)?;
+    match app.state::<WidgetState>().tray_icon.lock() {
+        Ok(mut state_tray_icon) => *state_tray_icon = Some(tray_icon),
+        Err(error) => eprintln!("无法保存托盘图标状态：{error}"),
+    }
     Ok(())
 }
 
@@ -864,7 +1395,7 @@ fn handle_run_event(app_handle: &AppHandle, event: tauri::RunEvent) {
     }
 }
 
-/// 创建 Tauri 应用，注册系统监控命令、配置状态和托盘菜单。
+/// 创建 Tauri 应用，注册系统监控命令、配置状态和托盘入口。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -873,9 +1404,19 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_widget_width,
             get_widget_config,
+            save_widget_settings,
+            hide_settings_window,
+            resize_settings_window,
+            get_gpt_reset_alert_state,
+            set_tray_flash_visible,
+            acknowledge_gpt_reset_alert,
+            open_widget_log,
+            quit_application,
             get_system_usage,
             open_task_manager,
-            get_codex_usage
+            get_codex_usage,
+            get_codex_reset_credits,
+            get_history_points
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
