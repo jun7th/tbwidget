@@ -3868,6 +3868,7 @@ dependencies = [
 name = "tbwidget"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

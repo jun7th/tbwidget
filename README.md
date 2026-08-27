@@ -82,7 +82,8 @@ widget-history.sqlite
   "download_visible": true,
   "gpt_refresh_seconds": 60,
   "gpt_display_mode": "remaining",
-  "gpt_proxy_url": ""
+  "gpt_proxy_url": "",
+  "taskbar_transparency_mode": "off"
 }
 ```
 
@@ -92,6 +93,7 @@ widget-history.sqlite
 - `gpt_display_mode` 支持 `remaining`（余量）或 `used`（用量）。
 - `gpt_refresh_seconds` 支持 `30`、`60`、`180`、`300` 或 `600`。
 - `gpt_proxy_url` 为空时直连，也可填写 HTTP、HTTPS 或 SOCKS5 代理地址。
+- `taskbar_transparency_mode` 支持 `off`（不修改系统任务栏透明效果）或 `clear`（尝试让系统任务栏完全透明）。
 
 ### GPT 代理设置
 
@@ -148,6 +150,8 @@ shell:startup
 - 网络速率会聚合系统识别到的网卡，可能包含 VPN、WSL、Hyper-V 等虚拟网卡。
 - 温度依赖系统可以提供的传感器信息，无法获取时显示 `N/A`。
 - 国内网络环境访问 GPT/Codex 通常需要代理，代理是否可用由用户自行确认。
+- 系统任务栏透明属于实验性功能，依赖 Windows 任务栏内部窗口和未公开的合成行为；Windows 更新、主题变化、Explorer 重启或第三方任务栏工具（如 TranslucentTB、StartAllBack、ExplorerPatcher）都可能导致效果失效或冲突。
+- 当前透明效果只尝试作用于主任务栏，不处理副显示器任务栏，也不会在 Explorer 重启后自动重新应用。
 - 配置和日志位于 exe 同目录时，该目录必须具有写入权限；不建议把程序直接放在需要管理员权限才能写入的目录。
 - 每次启动都会清空上一轮日志。如需保留错误记录，请在重启前复制 `widget.log`。
 
@@ -239,7 +243,8 @@ Configuration content example:
   "download_visible": true,
   "gpt_refresh_seconds": 60,
   "gpt_display_mode": "remaining",
-  "gpt_proxy_url": ""
+  "gpt_proxy_url": "",
+  "taskbar_transparency_mode": "off"
 }
 ```
 
@@ -249,6 +254,7 @@ Available values:
 - `gpt_display_mode`: `remaining` or `used`.
 - `gpt_refresh_seconds`: `30`, `60`, `180`, `300`, or `600`.
 - `gpt_proxy_url`: empty for direct access, or an HTTP, HTTPS, or SOCKS5 proxy URL.
+- `taskbar_transparency_mode`: `off` to leave the system taskbar unchanged, or `clear` to try making the system taskbar fully transparent.
 
 ### GPT Proxy
 
@@ -305,6 +311,8 @@ Copy the shortcut into that folder. Using a shortcut instead of copying the exec
 - Network rates aggregate interfaces detected by the system and may include VPN, WSL, Hyper-V, and other virtual adapters.
 - Temperature availability depends on accessible system sensors. `N/A` is shown when no valid reading is available.
 - GPT/Codex access may require a proxy depending on the region and network environment. Users are responsible for providing and validating their own proxy.
+- System taskbar transparency is experimental and depends on Windows taskbar internals and undocumented composition behavior. Windows updates, theme changes, Explorer restarts, or third-party taskbar tools such as TranslucentTB, StartAllBack, and ExplorerPatcher may disable the effect or conflict with it.
+- The transparency effect currently targets only the primary taskbar. Secondary monitor taskbars are not handled, and the effect is not automatically reapplied after Explorer restarts.
 - The executable directory must be writable because the configuration and log are stored next to the executable. Avoid protected directories that require administrator privileges for writes.
 - The previous log is erased on every startup. Copy `widget.log` before restarting if it must be preserved.
 

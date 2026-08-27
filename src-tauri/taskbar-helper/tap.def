@@ -1,0 +1,4 @@
+LIBRARY "tbwidget_taskbar_tap"
+EXPORTS
+    DllGetClassObject
+    DllCanUnloadNow

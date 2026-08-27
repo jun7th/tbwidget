@@ -14,17 +14,27 @@ use serde_json::Value;
 use sysinfo::{Components, Disks, Networks, System};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::{RECT, SYSTEMTIME},
+    Foundation::{HWND, POINT, RECT, SYSTEMTIME},
+    Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    },
     System::SystemInformation::GetLocalTime,
-    UI::WindowsAndMessaging::{MessageBoxW, SystemParametersInfoW, MB_OK, SPI_GETWORKAREA},
+    UI::{
+        HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+        WindowsAndMessaging::{IsWindow, MessageBoxW, IDYES, MB_ICONWARNING, MB_OK, MB_YESNO},
+    },
 };
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindowBuilder,
 };
 
 #[cfg(target_os = "windows")]
 mod taskbar;
+mod taskbar_transparency;
+mod proxy_config;
+
+use taskbar_transparency::TaskbarTransparencyManager;
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_USAGE_PATH: &str = "/backend-api/wham/usage";
@@ -32,8 +42,29 @@ const CODEX_RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate
 const CODEX_RESET_CREDITS_PATH: &str = "/backend-api/wham/rate-limit-reset-credits";
 const LOG_FILE_NAME: &str = "widget.log";
 const DATABASE_FILE_NAME: &str = "widget-history.sqlite";
-const ALLOWED_GPT_REFRESH_SECONDS: [u64; 5] = [30, 60, 180, 300, 600];
+const GPT_REFRESH_SECONDS: u64 = 60;
 const HISTORY_WRITE_INTERVAL_SECONDS: i64 = 60;
+const SETTINGS_MARGIN: f64 = 8.0;
+const SETTINGS_MIN_WIDTH: f64 = 320.0;
+
+fn clamp_settings_size(
+    measured_width: f64,
+    measured_height: f64,
+    work_area_width: f64,
+    work_area_height: f64,
+) -> (f64, f64) {
+    let available_width = (work_area_width - SETTINGS_MARGIN * 2.0).max(0.0);
+    let available_height = (work_area_height - SETTINGS_MARGIN * 2.0).max(0.0);
+    let width = measured_width
+        .max(SETTINGS_MIN_WIDTH.min(available_width))
+        .min(available_width);
+    let height = measured_height.max(0.0).min(available_height);
+    (width, height)
+}
+
+fn main_window_needs_rebuild(window_exists: bool, native_window_valid: bool) -> bool {
+    !window_exists || !native_window_valid
+}
 
 #[derive(Copy, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -47,6 +78,20 @@ pub(crate) enum WidgetPosition {
 enum GptDisplayMode {
     Remaining,
     Used,
+}
+
+#[derive(Copy, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TaskbarTransparencyMode {
+    Off,
+    Clear,
+}
+
+#[derive(Copy, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum AppLanguage {
+    En,
+    Zh,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -63,6 +108,8 @@ struct WidgetConfig {
     gpt_refresh_seconds: u64,
     gpt_display_mode: GptDisplayMode,
     gpt_proxy_url: String,
+    taskbar_transparency_mode: TaskbarTransparencyMode,
+    language: AppLanguage,
 }
 
 impl Default for WidgetConfig {
@@ -77,15 +124,70 @@ impl Default for WidgetConfig {
             disk_visible: true,
             upload_visible: true,
             download_visible: true,
-            gpt_refresh_seconds: 60,
+            gpt_refresh_seconds: GPT_REFRESH_SECONDS,
             gpt_display_mode: GptDisplayMode::Remaining,
             gpt_proxy_url: String::new(),
+            taskbar_transparency_mode: TaskbarTransparencyMode::Off,
+            language: AppLanguage::En,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_size_fits_small_work_area() {
+        assert_eq!(clamp_settings_size(432.0, 884.0, 360.0, 720.0), (344.0, 704.0));
+    }
+
+    #[test]
+    fn settings_size_keeps_template_size_when_space_allows() {
+        assert_eq!(clamp_settings_size(432.0, 884.0, 1920.0, 1040.0), (432.0, 884.0));
+    }
+
+    #[test]
+    fn settings_size_uses_measured_content_size_when_space_allows() {
+        assert_eq!(clamp_settings_size(344.0, 704.0, 1920.0, 1040.0), (344.0, 704.0));
+    }
+
+    #[test]
+    fn settings_size_fits_work_area_narrower_than_minimum_width() {
+        assert_eq!(clamp_settings_size(432.0, 884.0, 300.0, 200.0), (284.0, 184.0));
+    }
+
+    #[test]
+    fn settings_size_stays_non_negative_for_extremely_narrow_input() {
+        assert_eq!(clamp_settings_size(1.0, 1.0, 8.0, 4.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn widget_config_always_normalizes_to_sixty_seconds() {
+        let mut config = WidgetConfig {
+            cpu_visible: false,
+            gpt_refresh_seconds: 300,
+            ..WidgetConfig::default()
+        };
+
+        normalize_widget_config(&mut config);
+
+        assert!(!config.cpu_visible);
+        assert_eq!(config.gpt_refresh_seconds, 60);
+    }
+
+    #[test]
+    fn missing_or_invalid_main_window_requires_rebuild() {
+        assert!(!main_window_needs_rebuild(true, true));
+        assert!(main_window_needs_rebuild(true, false));
+        assert!(main_window_needs_rebuild(false, false));
     }
 }
 
 struct WidgetState {
     config: Mutex<WidgetConfig>,
+    taskbar_transparency: TaskbarTransparencyManager,
+    effective_proxy_url: String,
     log_path: PathBuf,
     db_path: PathBuf,
     system_sample_cache: Mutex<Option<CachedSystemSample>>,
@@ -166,9 +268,124 @@ struct HistoryPoint {
     secondary_value: Option<f64>,
 }
 
-/// 检查 GPT 刷新秒数是否属于允许值。
-fn is_valid_refresh_seconds(seconds: u64) -> bool {
-    ALLOWED_GPT_REFRESH_SECONDS.contains(&seconds)
+/// 将 GPT 刷新间隔固定为一分钟。
+fn normalize_widget_config(config: &mut WidgetConfig) {
+    config.gpt_refresh_seconds = GPT_REFRESH_SECONDS;
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_PERSONALIZE_REG_KEY: &str =
+    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+
+#[cfg(target_os = "windows")]
+fn should_prepare_system_transparency(previous: &WidgetConfig, next: &WidgetConfig) -> bool {
+    previous.taskbar_transparency_mode != TaskbarTransparencyMode::Clear
+        && next.taskbar_transparency_mode == TaskbarTransparencyMode::Clear
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_system_transparency_enabled(log_path: &Path) -> Result<(), String> {
+    match system_transparency_disabled() {
+        Ok(true) => {
+            append_error_log(log_path, "任务栏透明诊断 stage=system-transparency-disabled");
+            if !confirm_enable_system_transparency() {
+                append_error_log(log_path, "任务栏透明诊断 stage=enable-system-transparency-cancelled");
+                return Err("已取消开启系统透明效果".to_string());
+            }
+            enable_system_transparency_and_restart_explorer(log_path)
+        }
+        Ok(false) => Ok(()),
+        Err(error) => {
+            append_error_log(
+                log_path,
+                &format!("任务栏透明诊断 stage=check-system-transparency error={error}"),
+            );
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn system_transparency_disabled() -> Result<bool, String> {
+    let output = Command::new("C:\\Windows\\System32\\reg.exe")
+        .args([
+            "query",
+            WINDOWS_PERSONALIZE_REG_KEY,
+            "/v",
+            "EnableTransparency",
+        ])
+        .output()
+        .map_err(|error| format!("无法读取系统透明效果注册表：{error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "读取系统透明效果注册表失败 status={} stderr={stderr}",
+            output.status
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().filter(|line| line.contains("EnableTransparency")) {
+        let value = line.split_whitespace().last().unwrap_or_default();
+        return Ok(value == "0" || value.eq_ignore_ascii_case("0x0"));
+    }
+    Err("系统透明效果注册表值不存在".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn confirm_enable_system_transparency() -> bool {
+    let title: Vec<u16> = "任务栏透明\0".encode_utf16().collect();
+    let message: Vec<u16> =
+        "系统“透明效果”当前未开启。是否立即开启并重启 Explorer 外壳程序？\0"
+            .encode_utf16()
+            .collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONWARNING,
+        ) == IDYES
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn enable_system_transparency_and_restart_explorer(log_path: &Path) -> Result<(), String> {
+    let output = Command::new("C:\\Windows\\System32\\reg.exe")
+        .args([
+            "add",
+            WINDOWS_PERSONALIZE_REG_KEY,
+            "/v",
+            "EnableTransparency",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "1",
+            "/f",
+        ])
+        .output()
+        .map_err(|error| format!("无法开启系统透明效果：{error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "开启系统透明效果失败 status={} stderr={stderr}",
+            output.status
+        ));
+    }
+    append_error_log(log_path, "任务栏透明诊断 stage=enable-system-transparency-ok");
+
+    let output = Command::new("C:\\Windows\\System32\\taskkill.exe")
+        .args(["/F", "/IM", "explorer.exe"])
+        .output()
+        .map_err(|error| format!("无法停止 Explorer 外壳程序：{error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("停止 Explorer 外壳程序失败 status={} stderr={stderr}", output.status));
+    }
+    Command::new("C:\\Windows\\explorer.exe")
+        .spawn()
+        .map_err(|error| format!("无法启动 Explorer 外壳程序：{error}"))?;
+    append_error_log(log_path, "任务栏透明诊断 stage=restart-explorer-ok");
+    Ok(())
 }
 
 /// 获取用于日志前缀的本地日期时间。
@@ -405,7 +622,7 @@ fn build_codex_client(proxy_url: &str) -> Result<reqwest::Client, String> {
     let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
     if !proxy_url.is_empty() {
         let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|_| "GPT 代理地址无效，请检查 SQLite 配置中的 gpt_proxy_url".to_string())?;
+            .map_err(|_| "GPT 代理地址无效，请检查命令行 --proxy 或运行目录 config.json 中的 proxy".to_string())?;
         client_builder = client_builder.proxy(proxy);
     }
     client_builder
@@ -418,7 +635,9 @@ fn build_codex_client(proxy_url: &str) -> Result<reqwest::Client, String> {
 /// # Errors
 /// 当数据库打开、JSON 序列化或配置写入失败时返回中文错误信息。
 fn save_widget_config(path: &Path, config: &WidgetConfig) -> Result<(), String> {
-    let content = serde_json::to_string(config)
+    let mut config = config.clone();
+    normalize_widget_config(&mut config);
+    let content = serde_json::to_string(&config)
         .map_err(|error| format!("无法序列化组件配置：{error}"))?;
     let connection = Connection::open(path)
         .map_err(|error| format!("无法打开配置数据库 {}：{error}", path.display()))?;
@@ -443,12 +662,13 @@ fn load_widget_config(path: &Path) -> WidgetConfig {
 
     match load_result {
         Ok(content) => match serde_json::from_str::<WidgetConfig>(&content) {
-            Ok(config) if is_valid_refresh_seconds(config.gpt_refresh_seconds) => config,
-            Ok(_) => {
-                eprintln!("SQLite 组件配置中的 GPT 刷新间隔无效，将恢复默认配置");
-                let config = WidgetConfig::default();
-                if let Err(error) = save_widget_config(path, &config) {
-                    eprintln!("保存默认组件配置失败：{error}");
+            Ok(mut config) => {
+                let needs_save = config.gpt_refresh_seconds != GPT_REFRESH_SECONDS;
+                normalize_widget_config(&mut config);
+                if needs_save {
+                    if let Err(error) = save_widget_config(path, &config) {
+                        eprintln!("保存规范化组件配置失败：{error}");
+                    }
                 }
                 config
             }
@@ -497,7 +717,11 @@ fn set_widget_width(
 
     #[cfg(target_os = "windows")]
     {
-        taskbar::set_width(&window, width, position)
+        let result = taskbar::set_width(&window, width, position);
+        if let Err(error) = &result {
+            append_error_log(&state.log_path, &format!("任务栏组件重排失败：{error}"));
+        }
+        result
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -528,10 +752,17 @@ fn get_widget_config(state: tauri::State<'_, WidgetState>) -> Result<WidgetConfi
 fn save_widget_settings(
     app: AppHandle,
     state: tauri::State<'_, WidgetState>,
-    config: WidgetConfig,
+    mut config: WidgetConfig,
 ) -> Result<WidgetConfig, String> {
-    if !is_valid_refresh_seconds(config.gpt_refresh_seconds) {
-        return Err("GPT 刷新间隔无效".to_string());
+    normalize_widget_config(&mut config);
+    let previous_config = state
+        .config
+        .lock()
+        .map(|config| config.clone())
+        .map_err(|error| format!("无法锁定组件配置状态：{error}"))?;
+    #[cfg(target_os = "windows")]
+    if should_prepare_system_transparency(&previous_config, &config) {
+        ensure_system_transparency_enabled(&state.log_path)?;
     }
     {
         let mut current = state
@@ -541,6 +772,11 @@ fn save_widget_settings(
         *current = config.clone();
     }
     save_widget_config(&state.db_path, &config)?;
+    if previous_config.taskbar_transparency_mode != config.taskbar_transparency_mode {
+        let _ = state
+            .taskbar_transparency
+            .set_mode(config.taskbar_transparency_mode);
+    }
     app.emit("widget-config-changed", &config)
         .map_err(|error| format!("发送组件配置变更事件失败：{error}"))?;
     Ok(config)
@@ -560,33 +796,84 @@ fn hide_settings_window(app: AppHandle) -> Result<(), String> {
         .map_err(|error| format!("无法隐藏设置窗口：{error}"))
 }
 
-/// 根据设置面板内容自动调整设置窗口高度。
+/// 获取主显示器同一时刻的物理工作区与有效 DPI。
+#[cfg(target_os = "windows")]
+fn primary_work_area() -> Result<(RECT, u32), String> {
+    let monitor = unsafe {
+        MonitorFromPoint(
+            POINT { x: 0, y: 0 },
+            MONITOR_DEFAULTTOPRIMARY,
+        )
+    };
+    if monitor.is_null() {
+        return Err("无法定位 Windows 主显示器".to_string());
+    }
+
+    let mut monitor_info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        rcMonitor: RECT::default(),
+        rcWork: RECT::default(),
+        dwFlags: 0,
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0
+        || monitor_info.rcWork.right <= monitor_info.rcWork.left
+        || monitor_info.rcWork.bottom <= monitor_info.rcWork.top
+    {
+        return Err("无法获取 Windows 主显示器工作区".to_string());
+    }
+
+    let mut dpi_x = 96_u32;
+    let mut dpi_y = 96_u32;
+    let dpi_result = unsafe {
+        GetDpiForMonitor(
+            monitor,
+            MDT_EFFECTIVE_DPI,
+            &mut dpi_x,
+            &mut dpi_y,
+        )
+    };
+    let dpi = if dpi_result >= 0 && dpi_x > 0 {
+        dpi_x
+    } else {
+        96
+    };
+    Ok((monitor_info.rcWork, dpi))
+}
+
+/// 根据设置面板内容与主显示器工作区调整设置窗口。
 ///
 /// # Errors
 /// 当找不到窗口或调整窗口失败时返回中文错误信息。
 #[tauri::command]
-fn resize_settings_window(app: AppHandle, height: f64) -> Result<(), String> {
+fn resize_settings_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
     let window = app
         .get_webview_window("settings")
         .ok_or_else(|| "找不到 settings 设置窗口".to_string())?;
 
-    let next_height = height.round().clamp(120.0, 560.0);
+    #[cfg(target_os = "windows")]
+    {
+        let (work_area, dpi) = primary_work_area()?;
+        let scale = f64::from(dpi) / 96.0;
+        let work_area_width = f64::from(work_area.right - work_area.left) / scale;
+        let work_area_height = f64::from(work_area.bottom - work_area.top) / scale;
+        let (next_width, next_height) =
+            clamp_settings_size(width, height, work_area_width, work_area_height);
+        let runtime_min_width = SETTINGS_MIN_WIDTH
+            .min((work_area_width - SETTINGS_MARGIN * 2.0).max(0.0));
+        window
+            .set_min_size(Some(LogicalSize::new(runtime_min_width, 0.0)))
+            .map_err(|error| format!("无法调整设置窗口最小尺寸：{error}"))?;
+        window
+            .set_size(LogicalSize::new(next_width, next_height))
+            .map_err(|error| format!("无法调整设置窗口尺寸：{error}"))?;
+        position_settings_window_in_work_area(&window, &work_area)?;
+    }
 
-    let current_size = window
-        .inner_size()
-        .map_err(|error| format!("无法获取窗口尺寸：{error}"))?;
-
-    let scale_factor = window
-        .scale_factor()
-        .map_err(|error| format!("无法获取缩放比例：{error}"))?;
-
-    let current_width = current_size.width as f64 / scale_factor;
-
+    #[cfg(not(target_os = "windows"))]
     window
-        .set_size(LogicalSize::new(current_width, next_height))
+        .set_size(LogicalSize::new(width, height))
         .map_err(|error| format!("无法调整设置窗口尺寸：{error}"))?;
 
-    position_settings_window(&window);
     Ok(())
 }
 
@@ -787,17 +1074,10 @@ fn select_codex_rate_limit(payload: &Value) -> Option<&Value> {
 /// 当认证文件、HTTP 请求、状态码或响应解析失败时返回不含令牌的中文错误信息。
 #[tauri::command]
 async fn get_codex_usage(state: tauri::State<'_, WidgetState>) -> Result<CodexUsage, String> {
-    let proxy_url = match state.config.lock() {
-        Ok(config) => config.gpt_proxy_url.trim().to_string(),
-        Err(error) => {
-            let message = format!("无法读取 GPT 代理配置：{error}");
-            append_error_log(&state.log_path, &message);
-            return Err(message);
-        }
-    };
+    let proxy_url = state.effective_proxy_url.as_str();
     let result = async {
         let access_token = load_codex_access_token()?;
-        let client = build_codex_client(&proxy_url)?;
+        let client = build_codex_client(proxy_url)?;
 
         let response = client
             .get(CODEX_USAGE_URL)
@@ -869,17 +1149,10 @@ async fn get_codex_usage(state: tauri::State<'_, WidgetState>) -> Result<CodexUs
 async fn get_codex_reset_credits(
     state: tauri::State<'_, WidgetState>,
 ) -> Result<CodexResetCredits, String> {
-    let proxy_url = match state.config.lock() {
-        Ok(config) => config.gpt_proxy_url.trim().to_string(),
-        Err(error) => {
-            let message = format!("无法读取 GPT 代理配置：{error}");
-            append_error_log(&state.log_path, &message);
-            return Err(message);
-        }
-    };
+    let proxy_url = state.effective_proxy_url.as_str();
     let result = async {
         let access_token = load_codex_access_token()?;
-        let client = build_codex_client(&proxy_url)?;
+        let client = build_codex_client(proxy_url)?;
         let response = client
             .get(CODEX_RESET_CREDITS_URL)
             .header("Accept", "*/*")
@@ -1090,35 +1363,16 @@ fn query_gpt_history(connection: &Connection, since: i64) -> Result<Vec<HistoryP
         .map_err(|error| format!("无法读取 GPT 历史数据行：{error}"))
 }
 
-/// 将设置窗口移动到 Windows 工作区右下角。
+/// 将设置窗口移动到给定物理工作区的右下角。
 #[cfg(target_os = "windows")]
-fn position_settings_window(window: &tauri::WebviewWindow) {
-    let window_size = match window.outer_size() {
-        Ok(size) => size,
-        Err(error) => {
-            eprintln!("无法读取设置窗口尺寸，设置窗口将使用默认位置：{error}");
-            return;
-        }
-    };
-    let mut work_area = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    let ok = unsafe {
-        SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            &mut work_area as *mut RECT as *mut _,
-            0,
-        )
-    };
-    if ok == 0 || work_area.right <= work_area.left || work_area.bottom <= work_area.top {
-        eprintln!("无法获取 Windows 工作区，设置窗口将使用默认位置");
-        return;
-    }
-    let margin = 8_i32;
+fn position_settings_window_in_work_area(
+    window: &tauri::WebviewWindow,
+    work_area: &RECT,
+) -> Result<(), String> {
+    let window_size = window
+        .outer_size()
+        .map_err(|error| format!("无法读取设置窗口尺寸：{error}"))?;
+    let margin = SETTINGS_MARGIN as i32;
     let x = work_area
         .right
         .saturating_sub(window_size.width as i32)
@@ -1127,8 +1381,18 @@ fn position_settings_window(window: &tauri::WebviewWindow) {
         .bottom
         .saturating_sub(window_size.height as i32)
         .saturating_sub(margin);
-    if let Err(error) = window.set_position(PhysicalPosition::new(x, y)) {
-        eprintln!("无法移动设置窗口到右下角：{error}");
+    window
+        .set_position(PhysicalPosition::new(x, y))
+        .map_err(|error| format!("无法移动设置窗口到右下角：{error}"))
+}
+
+/// 将设置窗口移动到 Windows 主显示器工作区右下角。
+#[cfg(target_os = "windows")]
+fn position_settings_window(window: &tauri::WebviewWindow) {
+    let result = primary_work_area()
+        .and_then(|(work_area, _)| position_settings_window_in_work_area(window, &work_area));
+    if let Err(error) = result {
+        eprintln!("{error}，设置窗口将使用默认位置");
     }
 }
 
@@ -1145,6 +1409,10 @@ fn show_settings_window(app: &AppHandle) {
     position_settings_window(&window);
     if let Err(error) = window.show() {
         eprintln!("无法显示设置窗口：{error}");
+        return;
+    }
+    if let Err(error) = window.emit("settings-resize-requested", ()) {
+        eprintln!("无法请求设置窗口重新测量：{error}");
     }
     if let Err(error) = window.set_focus() {
         eprintln!("无法聚焦设置窗口：{error}");
@@ -1254,7 +1522,8 @@ fn open_widget_log(state: tauri::State<'_, WidgetState>) -> Result<(), String> {
 
 /// 退出整个组件应用。
 #[tauri::command]
-fn quit_application(app: AppHandle) {
+fn quit_application(app: AppHandle, state: tauri::State<'_, WidgetState>) {
+    let _ = state.taskbar_transparency.restore();
     app.exit(0);
 }
 
@@ -1276,6 +1545,9 @@ fn setup_tray(app: &AppHandle, _config: &WidgetConfig) -> Result<TrayIcon, Strin
                 if button_state != MouseButtonState::Up {
                     return;
                 }
+                if button != MouseButton::Left && button != MouseButton::Right {
+                    return;
+                }
                 let app_handle = tray.app_handle();
                 let has_alert = app_handle
                     .state::<WidgetState>()
@@ -1288,9 +1560,8 @@ fn setup_tray(app: &AppHandle, _config: &WidgetConfig) -> Result<TrayIcon, Strin
                     if let Err(error) = acknowledge_gpt_reset_alert_inner(state.inner()) {
                         eprintln!("确认 GPT 重置提醒失败：{error}");
                     }
-                } else if button == MouseButton::Right {
-                    show_settings_window(app_handle);
                 }
+                show_settings_window(app_handle);
             }
         })
         .build(app)
@@ -1326,16 +1597,32 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = runtime_data_dir().map_err(std::io::Error::other)?;
     let log_path = data_dir.join(LOG_FILE_NAME);
     let db_path = data_dir.join(DATABASE_FILE_NAME);
+    let cli_proxy = proxy_config::cli_proxy(env::args_os()).map_err(std::io::Error::other)?;
     fs::write(&log_path, "").map_err(|error| {
         std::io::Error::other(format!(
             "无法在每次启动时重建组件日志文件 {}：{error}",
             log_path.display()
         ))
     })?;
+    let file_proxy = match proxy_config::load_proxy_file(&data_dir.join("config.json")) {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            append_error_log(&log_path, &error);
+            None
+        }
+    };
+    let effective_proxy_url = proxy_config::resolve_proxy(cli_proxy, file_proxy).unwrap_or_default();
     init_history_database(&db_path).map_err(std::io::Error::other)?;
     let config = load_widget_config(&db_path);
+    let taskbar_transparency = TaskbarTransparencyManager::new(
+        log_path.clone(),
+        config.taskbar_transparency_mode,
+    )
+    .map_err(std::io::Error::other)?;
     app.manage(WidgetState {
         config: Mutex::new(config.clone()),
+        taskbar_transparency,
+        effective_proxy_url,
         log_path,
         db_path,
         system_sample_cache: Mutex::new(None),
@@ -1349,12 +1636,87 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         networks: Mutex::new(Networks::new_with_refreshed_list()),
         network_instant: Mutex::new(Instant::now()),
     });
+    app.state::<WidgetState>()
+        .taskbar_transparency
+        .attach_app_handle(app.handle().clone())
+        .map_err(std::io::Error::other)?;
     let tray_icon = setup_tray(app.handle(), &config).map_err(std::io::Error::other)?;
     match app.state::<WidgetState>().tray_icon.lock() {
         Ok(mut state_tray_icon) => *state_tray_icon = Some(tray_icon),
         Err(error) => eprintln!("无法保存托盘图标状态：{error}"),
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) enum MainWindowRecovery {
+    Ready {
+        window: tauri::WebviewWindow,
+        rebuilt: bool,
+    },
+    Stale,
+}
+
+/// 在 Explorer 重建任务栏后，于 Tauri 主线程确认、销毁或重建主组件窗口。
+#[cfg(target_os = "windows")]
+pub(crate) fn recover_main_taskbar_window(
+    app: &AppHandle,
+    should_cancel: impl Fn() -> bool,
+) -> Result<MainWindowRecovery, String> {
+    if should_cancel() {
+        return Err("main 窗口恢复已取消".to_string());
+    }
+    let existing = app.get_webview_window("main");
+    let native_valid = existing
+        .as_ref()
+        .and_then(|window| window.hwnd().ok())
+        .map(|native| {
+            let hwnd = native.0 as HWND;
+            !hwnd.is_null() && unsafe { IsWindow(hwnd) != 0 }
+        })
+        .unwrap_or(false);
+
+    if should_cancel() {
+        return Err("main 窗口恢复已取消".to_string());
+    }
+
+    if main_window_needs_rebuild(existing.is_some(), native_valid) {
+        if let Some(stale_window) = existing {
+            if should_cancel() {
+                return Err("main 窗口恢复已取消".to_string());
+            }
+            let _ = stale_window.destroy();
+            return Ok(MainWindowRecovery::Stale);
+        }
+
+        if should_cancel() {
+            return Err("main 窗口恢复已取消".to_string());
+        }
+        let config = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|config| config.label == "main")
+            .ok_or_else(|| "tauri.conf.json 中缺少 main 窗口配置".to_string())?;
+        if should_cancel() {
+            return Err("main 窗口恢复已取消".to_string());
+        }
+        let window = WebviewWindowBuilder::from_config(app, config)
+            .map_err(|error| format!("无法读取 main 窗口配置：{error}"))?
+            .build()
+            .map_err(|error| format!("无法重建 main 窗口：{error}"))?;
+        Ok(MainWindowRecovery::Ready {
+            window,
+            rebuilt: true,
+        })
+    } else {
+        let window = existing.ok_or_else(|| "main 窗口在恢复检查期间消失".to_string())?;
+        Ok(MainWindowRecovery::Ready {
+            window,
+            rebuilt: false,
+        })
+    }
 }
 
 /// 在 Tauri 就绪后将主窗口挂载到任务栏。
@@ -1378,7 +1740,11 @@ fn handle_run_event(app_handle: &AppHandle, event: tauri::RunEvent) {
                     WidgetPosition::Left
                 }
             };
-            if let Err(error) = taskbar::attach(&window, position) {
+            if let Err(error) = taskbar::reflow(&window, position) {
+                append_error_log(
+                    &app_handle.state::<WidgetState>().log_path,
+                    &format!("任务栏组件启动重排失败：{error}"),
+                );
                 eprintln!("任务栏挂载失败：{error}");
                 if let Err(show_error) = window.show() {
                     eprintln!("任务栏挂载失败后也无法显示 main 窗口：{show_error}");
