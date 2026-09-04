@@ -1,0 +1,39 @@
+:root {
+  font-family: Inter, "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
+  color: var(--kui-color-text, #f2f2f2);
+  background: transparent;
+  color-scheme: dark;
+  font-synthesis: none;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+html { scrollbar-gutter: unset; }  /*处理KUI会留下滚动条问题*/
+body { user-select: none; }
+input, textarea, [contenteditable="true"] { user-select: text; }
+button, input, textarea, select { font: inherit; }
+
+.ui-page { padding: 20px; color: var(--kui-color-text, #f2f2f2); }
+.ui-page-header, .ui-section-header, .ui-row, .ui-actions { display: flex; align-items: center; }
+.ui-page-header, .ui-section-header { justify-content: space-between; gap: 12px; }
+.ui-page-title { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 600; }
+.ui-section { margin-top: 18px; }
+.ui-section-title { margin: 0 0 10px; font-size: 13px; line-height: 1.3; font-weight: 600; color: var(--kui-color-text-description, #a9a9a9); }
+.ui-card { width: 100%; }
+.ui-list { display: flex; flex-direction: column; }
+.ui-row { justify-content: space-between; gap: 18px; padding: 8px 2px; }
+.ui-row + .ui-row { border-top: 1px solid var(--kui-color-border, rgba(255,255,255,.1)); }
+.ui-row--stacked { align-items: stretch; flex-direction: column; gap: 8px; }
+.ui-row:first-child {padding-top: 0px;}
+.ui-row:last-child {padding-bottom: 0px;}
+.ui-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ui-label { font-size: 14px; line-height: 1.4; color: var(--kui-color-text, #f2f2f2); }
+.ui-muted { font-size: 12px; line-height: 1.45; color: var(--kui-color-text-description, #9c9c9c); }
+.ui-value { font-size: 13px; color: var(--kui-color-text-description, #9c9c9c); }
+.ui-actions { gap: 8px; flex-wrap: wrap; }
+.ui-actions--end { justify-content: flex-end; }
+.ui-status { margin-top: 10px; padding: 9px 11px; border-radius: 6px; background: var(--kui-color-bg-component, rgba(255,255,255,.06)); color: var(--kui-color-text-description, #b8b8b8); font-size: 12px; }
+.ui-status--error { color: var(--kui-color-danger, #ff7875); }
+.ui-empty { padding: 28px 12px; text-align: center; color: var(--kui-color-text-description, #999); }

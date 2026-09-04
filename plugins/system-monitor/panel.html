@@ -1,0 +1,161 @@
+<style>
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: transparent;
+    color: #eef2ff;
+    font-family: Inter, system-ui, sans-serif;
+  }
+
+  #panel {
+    display: inline-flex;
+    height: 34px;
+    align-items: center;
+    gap: 7px;
+    padding: 0 7px;
+    white-space: nowrap;
+    overflow: hidden;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .metric,
+  .stack {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .metric[hidden],
+  .stack[hidden] {
+    display: none;
+  }
+
+  .metric-icon {
+    width: 16px;
+    height: 16px;
+    display: block;
+    flex: 0 0 auto;
+    color: #aeb8c7;
+  }
+
+  .metric-icon * {
+    vector-effect: non-scaling-stroke;
+  }
+
+  .value {
+    display: inline-block;
+    text-align: right;
+    font-weight: 600;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .value-percent {
+    width: 4ch; /* 预留 100% */
+    flex: 0 0 4ch;
+  }
+
+  .value-temp {
+    width: 6ch;
+    flex: 0 0 6ch;
+  }
+
+  .value-frequency,
+  .value-fan {
+    width: 8ch;
+    flex: 0 0 8ch;
+  }
+
+  .value-logical {
+    width: 3ch;
+    flex: 0 0 3ch;
+  }
+
+  .stack-values {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 0;
+    line-height: 10px;
+  }
+
+  .stack-line {
+    display: block;
+    width: 8ch; /* 以 999 KB/s 为默认保留宽度 */
+    height: 10px;
+    text-align: right;
+    font-size: 9px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+
+<div id="panel" aria-label="系统资源监视">
+  <span class="metric" id="mCpu">
+    <!-- SVG placeholder: CPU -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 9h6v6H9zM8 2v3M12 2v3M16 2v3M8 19v3M12 19v3M16 19v3M2 8h3M2 12h3M2 16h3M19 8h3M19 12h3M19 16h3" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+    <span class="value value-percent" id="cpu">--</span>
+  </span>
+
+  <span class="metric" id="mTemperature">
+    <!-- SVG placeholder: Temperature -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14.5V5a2 2 0 1 1 4 0v9.5a4 4 0 1 1-4 0Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+    <span class="value value-temp" id="temperature">N/A</span>
+  </span>
+
+  <span class="metric" id="mFrequency">
+    <!-- SVG placeholder: Frequency -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3l2.2-6 3.6 12 2.4-8 1.8 2H21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span class="value value-frequency" id="frequency">--</span>
+  </span>
+
+  <span class="metric" id="mLogical">
+    <!-- SVG placeholder: Logical processors -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="4" y="13" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13" y="13" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+    <span class="value value-logical" id="logical">--</span>
+  </span>
+
+  <span class="metric" id="mMemory">
+    <!-- SVG placeholder: Memory -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 10v4M11 10v4M15 10v4M19 10v4M6 5v2M10 5v2M14 5v2M18 5v2M6 17v2M10 17v2M14 17v2M18 17v2" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+    <span class="value value-percent" id="memory">--</span>
+  </span>
+
+  <span class="metric" id="mDiskUsage">
+    <!-- SVG placeholder: Disk usage -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+    <span class="value value-percent" id="diskUsage">--</span>
+  </span>
+
+  <span class="stack" id="mNetwork">
+    <!-- SVG placeholder: Network -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v15m0 0-4-4m4 4 4-4M16 20V5m0 0-4 4m4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span class="stack-values">
+      <span class="stack-line" id="down">--</span>
+      <span class="stack-line" id="up">--</span>
+    </span>
+  </span>
+
+  <span class="stack" id="mDisk">
+    <!-- SVG placeholder: Disk I/O -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg>
+    <span class="stack-values">
+      <span class="stack-line" id="read">--</span>
+      <span class="stack-line" id="write">--</span>
+    </span>
+  </span>
+
+  <span class="metric" id="mFan">
+    <!-- SVG placeholder: Fan -->
+    <svg class="metric-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 10c-1-4 .5-7 3-7 2.5 0 3.1 3.1 1.2 5.6C15 10.1 13.8 10.5 12 10ZM14 12c4-1 7 .5 7 3 0 2.5-3.1 3.1-5.6 1.2C13.9 15 13.5 13.8 14 12ZM12 14c1 4-.5 7-3 7-2.5 0-3.1-3.1-1.2-5.6C9 13.9 10.2 13.5 12 14ZM10 12c-4 1-7-.5-7-3 0-2.5 3.1-3.1 5.6-1.2C10.1 9 10.5 10.2 10 12Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+    <span class="value value-fan" id="fan">N/A</span>
+  </span>
+</div>

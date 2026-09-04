@@ -1,0 +1,12 @@
+{
+  "plugins": {
+    "gpt": {
+      "enabled": true,
+      "order": 0
+    },
+    "system-monitor": {
+      "enabled": true,
+      "order": 1
+    }
+  }
+}

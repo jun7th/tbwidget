@@ -1,0 +1,235 @@
+<style>
+  html,
+  body,
+  #plugin-root {
+    margin: 0;
+    overflow: hidden;
+    background: #141414;
+    color: #f5f5f5
+  }
+
+  .popup {
+    width: 340px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    color: #f5f5f5
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px
+  }
+
+  .metric {
+    position: relative;
+    /* min-height: 70px; */
+    padding: 10px;
+    border-radius: 8px;
+    background: #152b41;
+    color: #f5f5f5;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    cursor: pointer;
+    transition: background .12s ease, box-shadow .12s ease;
+    border: 1px solid transparent;
+  }
+
+  .metric:hover {
+    background: #262626
+  }
+
+  .metric:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px #54a9ff
+  }
+
+  .metric--disabled {
+    background: #1b1b1b
+  }
+
+  .metric-switch {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 3;
+    pointer-events: none; 
+  }
+
+  .metric-label,
+  .metric-value,
+  .metric-sub,
+  .dual,
+  .dual-key {
+    position: relative;
+    z-index: 1;
+    visibility: visible !important;
+    -webkit-text-fill-color: currentColor
+  }
+
+  .metric-label {
+    font-size: 11px;
+    color: #bfbfbf !important;
+    margin-bottom: 5px
+  }
+
+  .metric-value {
+    font-size: 16px;
+    font-weight: 650;
+    color: #f5f5f5 !important;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2
+  }
+
+  .metric-sub {
+    margin-top: 5px;
+    font-size: 10px;
+    color: #bfbfbf !important;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis
+  }
+
+  .dual {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #f5f5f5 !important;
+    font-variant-numeric: tabular-nums
+  }
+
+  .dual-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px
+  }
+
+  .dual-key {
+    font-size: 10px;
+    color: #bfbfbf !important;
+    font-weight: 400
+  }
+
+  .metric--disabled .metric-label,
+  .metric--disabled .metric-sub,
+  .metric--disabled .dual-key {
+    color: #8c8c8c !important
+  }
+
+  .metric--disabled .metric-value,
+  .metric--disabled .dual {
+    color: #d9d9d9 !important
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px
+  }
+
+  .refresh-row {
+    padding: 0px 0
+  }
+
+  .label {
+    font-size: 12px;
+    color: #f5f5f5 !important
+  }
+
+  .error {
+    font-size: 12px;
+    color: #ff7875
+  }
+</style>
+<div class="popup">
+  <div class="grid">
+    <div class="metric" :class="{'metric--disabled':!settings.cpu}" role="button" tabindex="0" @click="toggle('cpu')"
+      @keydown.enter.prevent="toggle('cpu')" @keydown.space.prevent="toggle('cpu')">
+      <k-switch class="metric-switch" size="small" v-model="settings.cpu"></k-switch>
+      <div class="metric-label">CPU 用量</div>
+      <div class="metric-value">{{ pct(snapshot?.cpu?.usagePercent) }}</div>
+      <div class="metric-sub">任务栏显示 CPU 总负载</div>
+    </div>
+    <div class="metric" :class="{'metric--disabled':!settings.temperature}" role="button" tabindex="0"
+      @click="toggle('temperature')" @keydown.enter.prevent="toggle('temperature')"
+      @keydown.space.prevent="toggle('temperature')">
+      <k-switch class="metric-switch" size="small" v-model="settings.temperature"></k-switch>
+      <div class="metric-label">CPU 温度</div>
+      <div class="metric-value">{{ temp(snapshot?.cpu?.temperatureC) }}</div>
+      <div class="metric-sub">{{ snapshot?.cpu?.temperatureC == null ? '传感器暂不可用' : 'sysinfo' }}</div>
+    </div>
+    <div class="metric" :class="{'metric--disabled':!settings.frequency}" role="button" tabindex="0"
+      @click="toggle('frequency')" @keydown.enter.prevent="toggle('frequency')"
+      @keydown.space.prevent="toggle('frequency')">
+      <k-switch class="metric-switch" size="small" v-model="settings.frequency"></k-switch>
+      <div class="metric-label">CPU 频率</div>
+      <div class="metric-value">{{ frequency(snapshot?.cpu?.frequencyMhz) }}</div>
+    </div>
+    <!-- <div class="metric" :class="{'metric--disabled':!settings.logical}" role="button" tabindex="0"
+      @click="toggle('logical')" @keydown.enter.prevent="toggle('logical')" @keydown.space.prevent="toggle('logical')">
+      <k-switch class="metric-switch" size="small" v-model="settings.logical"></k-switch>
+      <div class="metric-label">逻辑处理器</div>
+      <div class="metric-value">{{ snapshot?.cpu?.logicalProcessors ?? '--' }}</div>
+      <div class="metric-sub">任务栏显示逻辑处理器数量</div>
+    </div> -->
+    <div class="metric" :class="{'metric--disabled':!settings.memory}" role="button" tabindex="0"
+      @click="toggle('memory')" @keydown.enter.prevent="toggle('memory')" @keydown.space.prevent="toggle('memory')">
+      <k-switch class="metric-switch" size="small" v-model="settings.memory"></k-switch>
+      <div class="metric-label">内存用量</div>
+      <div class="metric-value">{{ pct(snapshot?.memory?.usagePercent) }}</div>
+      <div class="metric-sub">{{ memoryText }}</div>
+    </div>
+    <div class="metric" :class="{'metric--disabled':!settings.diskUsage}" role="button" tabindex="0"
+      @click="toggle('diskUsage')" @keydown.enter.prevent="toggle('diskUsage')"
+      @keydown.space.prevent="toggle('diskUsage')">
+      <k-switch class="metric-switch" size="small" v-model="settings.diskUsage"></k-switch>
+      <div class="metric-label">磁盘空间</div>
+      <div class="metric-value">{{ pct(snapshot?.disk?.usagePercent) }}</div>
+      <div class="metric-sub">{{ diskText }}</div>
+    </div>
+    <div class="metric" :class="{'metric--disabled':!settings.network}" role="button" tabindex="0"
+      @click="toggle('network')" @keydown.enter.prevent="toggle('network')" @keydown.space.prevent="toggle('network')">
+      <k-switch class="metric-switch" size="small" v-model="settings.network"></k-switch>
+      <div class="metric-label">网络流量</div>
+      <div class="dual">
+        <div class="dual-row"><span class="dual-key">↓ 下载</span><span>{{ rate(snapshot?.network?.downBytesPerSec)
+            }}</span></div>
+        <div class="dual-row"><span class="dual-key">↑ 上传</span><span>{{ rate(snapshot?.network?.upBytesPerSec)
+            }}</span></div>
+      </div>
+    </div>
+    <div class="metric" :class="{'metric--disabled':!settings.disk}" role="button" tabindex="0" @click="toggle('disk')"
+      @keydown.enter.prevent="toggle('disk')" @keydown.space.prevent="toggle('disk')">
+      <k-switch class="metric-switch" size="small" v-model="settings.disk"></k-switch>
+      <div class="metric-label">磁盘 I/O</div>
+      <div class="dual">
+        <div class="dual-row"><span class="dual-key">读取</span><span>{{ rate(snapshot?.disk?.readBytesPerSec) }}</span>
+        </div>
+        <div class="dual-row"><span class="dual-key">写入</span><span>{{ rate(snapshot?.disk?.writeBytesPerSec)
+            }}</span></div>
+      </div>
+    </div>
+    <div class="metric" :class="{'metric--disabled':!settings.fan}" role="button" tabindex="0" @click="toggle('fan')"
+      @keydown.enter.prevent="toggle('fan')" @keydown.space.prevent="toggle('fan')">
+      <k-switch class="metric-switch" size="small" v-model="settings.fan"></k-switch>
+      <div class="metric-label">风扇</div>
+      <div class="metric-value">{{ fanText }}</div>
+      <div class="metric-sub">{{ snapshot?.fans?.length ? snapshot.fans[0].name : '传感器暂不可用' }}</div>
+    </div>
+  </div>
+
+  <k-card theme="fill" size="small">
+    <div class="row refresh-row"><span class="label">刷新间隔</span><k-radio-group :model-value="String(settings.refreshMs)"
+        :options="refreshOptions" type="button" @change="value => save({refreshMs:Number(value)})" /></div>
+  </k-card>
+  <div v-if="error" class="error">{{ error }}</div>
+</div>

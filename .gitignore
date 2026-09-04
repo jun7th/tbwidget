@@ -1,0 +1,50 @@
+# 依赖目录（不上传）
+/node_modules/
+
+# 前端和 Rust/Tauri 构建产物（不上传）
+/dist/
+/dist-ssr/
+/.vite/
+/src-tauri/target/
+/src-tauri/gen/
+
+# 本机运行配置和日志（不上传）
+/widget-config.json
+/widget-history.sqlite
+/logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 本机开发环境和编辑器配置（不上传）
+/.vscode/
+/.idea/
+*.local
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 环境变量和敏感配置（不上传）
+.env
+.env.*
+!.env.example
+
+# 编译后的程序和运行库（不上传）
+*.exe
+*.dll
+*.lib
+*.pdb
+*.msi
+*.msix
+*.appx
+*.dmg
+
+# 操作系统生成文件（不上传）
+.DS_Store
+Thumbs.db
+desktop.ini

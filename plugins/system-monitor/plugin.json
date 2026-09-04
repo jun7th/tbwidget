@@ -1,0 +1,14 @@
+{
+  "manifestVersion": 1,
+  "id": "system-monitor",
+  "name": "系统资源监视",
+  "description": "内置系统监视插件：显示 CPU、内存、网络、磁盘 I/O，并为温度与风扇传感器保留位置。",
+  "version": "3.1.1",
+  "builtin": true,
+  "panel": "panel.html",
+  "popup": "popup.html",
+  "permissions": [
+    "storage",
+    "system.metrics"
+  ]
+}

@@ -1,0 +1,149 @@
+<style>
+  html,
+  body,
+  #plugin-root {
+    margin: 0;
+    overflow: hidden;
+    background: var(--kui-color-bg, #141414)
+  }
+
+  .popup {
+    width: 340px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px
+  }
+
+  .usage-card {
+    padding: 2px
+  }
+
+  .card-title {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 600
+  }
+
+  .usage-row {
+    padding: 10px 2px;
+    min-height: 48px;
+    --kui-color-bg-component: #141414;
+  }
+
+  .usage-row+.usage-row {
+    border-top: 1px solid var(--kui-color-border, rgba(255, 255, 255, .1))
+  }
+
+  .usage-row:first-child{
+    padding-top: 0px;
+  }
+
+  .usage-row:last-child{
+    padding-bottom: 0px;
+  }
+
+
+  .usage-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 52px;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .usage-heading {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px
+  }
+
+  .label {
+    font-size: 12px
+  }
+
+  .muted {
+    font-size: 12px;
+    color: var(--kui-color-text-description, #999)
+  }
+
+  .usage-reset {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap
+  }
+
+  .usage-value {
+    width: 52px;
+    text-align: right;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums
+  }
+
+  .list {
+    display: flex;
+    flex-direction: column
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 36px;
+    /* padding: 7px 2px */
+  }
+
+  .row+.row {
+    border-top: 1px solid var(--kui-color-border, rgba(255, 255, 255, .1))
+  }
+
+  .actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px
+  }
+
+  .error {
+    font-size: 12px;
+    color: var(--kui-color-danger, #ff7875)
+  }
+ 
+</style>
+<div class="popup">
+  <k-card theme="fill" class="usage-card" size="small" title="用量" bordered>
+      <template #extra>
+         <k-space wrap style="position: absolute; right:8px; top: 8px;">
+          <k-button size="small" :loading="refreshing" @click="refresh" >刷新</k-button>
+          <k-button size="small" :loading="refreshing" @click="resetUsage">重置</k-button>
+         </k-space >
+      </template>
+    <div class="usage-row">
+      <div class="usage-top"><span class="usage-heading"><span class="label">5 小时限额</span><span
+            class="muted usage-reset">{{ durationText(primaryResetAt) }}</span></span><strong class="usage-value">{{
+          formatPercent(primaryPercent) }}</strong></div>
+      <k-progress :percent="primaryPercent ?? 0" :show-info="false" size="small" />
+    </div>
+    <div class="usage-row">
+      <div class="usage-top"><span class="usage-heading"><span class="label">1 周限额</span><span
+            class="muted usage-reset">{{ durationText(weeklyResetAt) }}</span></span><strong class="usage-value">{{
+          formatPercent(weeklyPercent) }}</strong></div>
+      <k-progress :percent="weeklyPercent ?? 0" :show-info="false" size="small" />
+    </div>
+  </k-card>
+
+  <k-card theme="fill">
+    <div class="list">
+      <div class="row"><span class="label">显示内容</span><k-radio-group :model-value="settings.displayMode"
+          :options="displayOptions" type="button" theme="card"  @change="value => savePopupSettings({ displayMode: value })" /></div>
+      <div class="row"><span class="label">任务栏限额</span><k-radio-group :model-value="settings.windowMode"
+          :options="windowOptions" type="button" theme="card"  @change="value => savePopupSettings({ windowMode: value })" /></div>
+      <div class="row"><span class="label">刷新时间</span><k-radio-group :model-value="String(settings.refreshSeconds)"
+          :options="refreshOptions" type="button" theme="card" 
+          @change="value => savePopupSettings({ refreshSeconds: Number(value) })" /></div>
+    </div>
+  </k-card>
+  <div v-if="error" class="error">{{ error }}</div>
+  <div v-if="meta" class="muted">{{ meta }}</div>
+</div>
