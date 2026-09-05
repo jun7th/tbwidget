@@ -1398,7 +1398,19 @@ pub fn taskbar_right_reserved_logical_width() -> Result<f64, String> {
             return Err(last_error("无法读取任务栏托盘区域尺寸"));
         }
 
-        let reserved_physical = (taskbar_rect.right - tray_rect.left).max(0);
+        let taskbar_width = (taskbar_rect.right - taskbar_rect.left).max(0);
+        if taskbar_width == 0
+            || tray_rect.right <= taskbar_rect.left
+            || tray_rect.left >= taskbar_rect.right
+        {
+            return Ok(0.0);
+        }
+
+        // TrayNotifyWnd 覆盖通知图标、隐藏图标入口、输入/网络/音量及时钟等右侧系统区域。
+        // 用它在屏幕坐标中的左边界计算需要保留的宽度，再限制到任务栏自身范围内，
+        // 避免 Explorer 重建任务栏期间出现异常矩形导致组件被推得过远。
+        let tray_left = tray_rect.left.clamp(taskbar_rect.left, taskbar_rect.right);
+        let reserved_physical = (taskbar_rect.right - tray_left).clamp(0, taskbar_width);
         let dpi = GetDpiForWindow(taskbar).max(96);
         Ok(f64::from(physical_to_logical_width(reserved_physical, dpi)))
     }

@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { nextTick, onMounted, onUnmounted, ref } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import PluginPanels from "../components/PluginPanels.vue";
 import { useWidgetConfig } from "../composables/useWidgetConfig";
+
+const RIGHT_RESERVED_GAP = 8;
+const RIGHT_RESERVED_POLL_MS = 1000;
 
 const root = ref<HTMLElement | null>(null);
 const rightReserved = ref(0);
@@ -11,6 +14,8 @@ const debugMode = ref(false);
 const { config, load: loadConfig, dispose: disposeConfig } = useWidgetConfig();
 const unlisteners: UnlistenFn[] = [];
 let resizeObserver: ResizeObserver | undefined;
+let rightReservedTimer: number | undefined;
+let rightReservedRefreshPending = false;
 let lastWidth = 0;
 
 async function syncInteractiveRegions() {
@@ -29,12 +34,24 @@ async function syncInteractiveRegions() {
   await invoke("set_taskbar_interactive_regions", { regions, scaleFactor: window.devicePixelRatio || 1 }).catch(() => undefined);
 }
 
-async function syncWindow() {
-  if (config.value.position === "right") {
-    rightReserved.value = Math.max(0, await invoke<number>("get_taskbar_right_reserved_width").catch(() => 0));
-  } else {
+async function refreshRightReserved() {
+  if (config.value.position !== "right") {
+    const changed = rightReserved.value !== 0;
     rightReserved.value = 0;
+    return changed;
   }
+
+  const nextReserved = Math.max(
+    0,
+    await invoke<number>("get_taskbar_right_reserved_width").catch(() => rightReserved.value),
+  );
+  if (Math.abs(nextReserved - rightReserved.value) < 0.5) return false;
+  rightReserved.value = nextReserved;
+  return true;
+}
+
+async function syncWindow() {
+  await refreshRightReserved();
   await nextTick();
   const width = Math.max(1, window.innerWidth);
   if (width !== lastWidth) {
@@ -43,6 +60,23 @@ async function syncWindow() {
   }
   await syncInteractiveRegions();
 }
+
+async function pollRightReserved() {
+  if (config.value.position !== "right" || rightReservedRefreshPending) return;
+  rightReservedRefreshPending = true;
+  try {
+    if (!await refreshRightReserved()) return;
+    await nextTick();
+    await syncInteractiveRegions();
+  } finally {
+    rightReservedRefreshPending = false;
+  }
+}
+
+const stopPositionWatch = watch(
+  () => config.value.position,
+  () => void syncWindow(),
+);
 
 function onRegionsChanged() { void syncWindow(); }
 
@@ -119,6 +153,7 @@ onMounted(async () => {
   if (root.value) resizeObserver.observe(root.value);
   window.addEventListener("tbwidget-interactive-regions-changed", onRegionsChanged);
   unlisteners.push(await listen("display-environment-changed", () => void syncWindow()));
+  rightReservedTimer = window.setInterval(() => void pollRightReserved(), RIGHT_RESERVED_POLL_MS);
   await syncWindow();
   if (import.meta.env.DEV || debugMode.value) {
     await nextTick();
@@ -131,6 +166,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect();
+  if (rightReservedTimer !== undefined) window.clearInterval(rightReservedTimer);
+  stopPositionWatch();
   window.removeEventListener("tbwidget-interactive-regions-changed", onRegionsChanged);
   unlisteners.forEach(unlisten => unlisten());
   disposeConfig();
@@ -142,7 +179,7 @@ onUnmounted(() => {
     ref="root"
     class="taskbar-view"
     :class="`taskbar-view--${config.position}`"
-    :style="config.position === 'right' ? { paddingRight: `${rightReserved + 8}px` } : undefined"
+    :style="config.position === 'right' ? { paddingRight: `${rightReserved + RIGHT_RESERVED_GAP}px` } : undefined"
   >
     <div class="taskbar-plugin-container" :class="{ 'taskbar-plugin-container--debug': debugMode }">
       <PluginPanels />
