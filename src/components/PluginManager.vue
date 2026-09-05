@@ -3,9 +3,9 @@ import { RefreshCcw } from "kui-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import type { PluginDescriptor } from "../plugins/types";
 
-type PluginBundle = { id: string; name: string; description: string; version: string; permissions: string[]; enabled: boolean; order: number; builtin: boolean; };
-const plugins = ref<PluginBundle[]>([]);
+const plugins = ref<PluginDescriptor[]>([]);
 const busy = ref("");
 const refreshing = ref(false);
 const error = ref("");
@@ -18,16 +18,16 @@ const sortedPlugins = computed(() => [...plugins.value].sort((left, right) => {
 }));
 
 async function loadPlugins() {
-  try { plugins.value = await invoke<PluginBundle[]>("list_plugins"); error.value = ""; }
+  try { plugins.value = await invoke<PluginDescriptor[]>("list_plugins"); error.value = ""; }
   catch (reason) { error.value = String(reason); }
 }
 async function refreshPlugins() {
   refreshing.value = true;
-  try { plugins.value = await invoke<PluginBundle[]>("refresh_plugins"); error.value = ""; }
+  try { plugins.value = await invoke<PluginDescriptor[]>("refresh_plugins"); error.value = ""; }
   catch (reason) { error.value = String(reason); }
   finally { refreshing.value = false; }
 }
-async function toggle(plugin: PluginBundle, enabled: boolean) {
+async function toggle(plugin: PluginDescriptor, enabled: boolean) {
   busy.value = plugin.id;
   try { await invoke("set_plugin_enabled", { pluginId: plugin.id, enabled }); await loadPlugins(); }
   catch (reason) { error.value = String(reason); await loadPlugins(); }
@@ -52,7 +52,7 @@ onUnmounted(() => unlisten?.());
           <div class="plugin-title-row">
             <div class="plugin-title-copy">
               <span class="ui-label plugin-name">{{ plugin.name }}</span>
-              <k-tag v-if="plugin.builtin" size="small" color="#55acee">内置</k-tag>
+              <k-tag v-if="plugin.builtin" size="small"style="border: 1px solid #6c0;" >内置</k-tag>
               <k-tag size="small">v{{ plugin.version }}</k-tag>
             </div>
             <k-switch size="small" :model-value="plugin.enabled" :loading="busy === plugin.id"

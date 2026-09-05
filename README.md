@@ -1,36 +1,83 @@
 # TB Widget
 
-Windows 11 任务栏插件宿主，使用 Tauri 2 + Rust + Vue 3 + TypeScript。
+Windows 11 任务栏插件宿主，技术栈：Tauri 2 + Rust + Vue 3 + TypeScript。
 
-## 架构原则
+## 运行目录
 
-底座不包含 GPT、系统监控、天气等任何业务逻辑。插件 Host API 只提供通用基础能力：
+打包后以 **当前 EXE 所在目录** 为运行根目录：
 
-- `host.http.request()`：通用 HTTP/HTTPS 请求。
-- `host.fs.readText()` / `host.fs.readBytes()`：文件读取。
-- `host.storage.*`：按插件隔离的数据存储。
-- `host.wasm.*`：加载并调用插件自己的 `plugin.wasm`。
-- Popup / Settings 等插件窗口生命周期由宿主管理，但不属于业务 API。
-
-业务协议、数据解析、计算规则都应放在插件 JS/WASM 中。WASM 本身处于沙箱，不能凭空访问 Windows API；若未来需要新的原生能力，应设计通用能力接口，而不是把具体业务写进底座。
-
-UI 统一使用 `kui-vue`，默认 KUI dark theme，不再维护 `tb-*` Web Components。
-
-## 开发运行
-
-```bat
-npm install
-npm run tauri dev
+```text
+TBWidget.exe
+plugins/                         # 插件目录
+save/
+  config/
+    config.json                  # 主设置、插件启停/排序/目录
+    plugin/
+      <plugin-dir>/config.json   # 插件自己的设置与缓存
+  log/
+    YYYYMMDD.log                 # 当天日志，只追加
 ```
 
-`npm install` 会自动执行 `sync:kui`，把插件 iframe 所需的 Vue/KUI UMD 与 CSS 同步到 `public/vendor/`，运行时不依赖 CDN。
+`save/config/config.json` 不存在时会自动创建。首次创建会登记扫描到的插件；插件配置文件不存在时会从插件目录的 `default-config.json` 创建，没有默认文件则创建空 JSON。
+
+## 插件扫描
+
+程序启动会扫描 `plugins/` 目录并更新插件登记信息。
+
+- 启动时会读取 `save/config/config.json` 中已登记的插件，并把新发现的插件登记为默认关闭。
+- 新增、删除或替换插件后，也可以在设置页点击“刷新”按钮手动重新扫描目录。
+- 发布版直接读取 EXE 同目录的 `plugins/`。
+
+
+## 调试模式
+
+在 `save/config/config.json` 根节点设置：
+
+```json
+{
+  "debug": true
+}
+```
+
+重启后任务栏容器使用黑色半透明背景，并在当天日志中追加插件目录、Tauri 资源目录、已加载插件描述数量以及各插件的 panel/popup/settings 入口。排查完成后改回 `false`。
+
+## SQLite
+
+SQLite 功能目前默认屏蔽，但源码保留。
+
+正常构建：
+
+```bat
+npm run tauri -- build
+```
+
+如以后需要重新启用 SQLite：
+
+```bat
+npm run tauri -- build --features sqlite-storage
+```
+
+默认构建不会创建、读取或迁移 `widget-history.sqlite`。
+
+## 开发与构建
 
 要求：Node.js 20.19+、Rust stable、Windows WebView2。
 
-## 插件
+```bat
+npm install
+npm run tauri -- dev
+```
 
-`plugins/` 中保留 `gpt-usage` 作为通用能力示例。GPT/Codex 的 URL、认证文件解析、Usage 数据解析全部位于插件中；底座只负责文件读取和 HTTP 请求。
+发布：
 
-插件 Popup 的宽高由内容实时测量并通知宿主窗口，自适应实际内容，不再限制为固定 220–480px。最大尺寸仅受当前显示器可用区域限制。
+```bat
+npm run tauri -- build
+```
 
-完整插件约定见 `docs/UI-SDK.md` 与 `plugins/README.md`。
+`npm install` / `prebuild` 会执行 `sync:kui`，把插件可选使用的 Vue/KUI 运行时同步到 `public/vendor/`，运行时不依赖 CDN。
+
+## 插件开发
+
+插件使用 Manifest v2：Panel / Popup / Settings 都是普通 HTML Surface，通过 `tbplugin://` 按需加载；HTML 可自行引用独立 CSS/JS。宿主只提供插件私有存储、HTTP、文件读取与窗口生命周期，当前版本不实现 WASM。`system.metrics` 是唯一内置特殊能力，只允许内置 `system-monitor` 使用。
+
+插件格式、权限、Host API、配置存储、Popup/Settings 规则见 [`docs/PLUGIN-SDK.md`](docs/PLUGIN-SDK.md)。

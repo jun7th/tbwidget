@@ -1,18 +1,7 @@
 (() => {
   const root = document.getElementById("plugin-root");
-  const sourceNode = document.getElementById("tb-plugin-source");
   if (!root || !window.Vue || !window.kui) {
     console.error("[TB Widget] KUI 插件运行时未就绪");
-    return;
-  }
-
-  window.tbPlugin = undefined;
-  const source = sourceNode?.textContent || "";
-  try {
-    if (source.trim()) new Function(source)();
-  } catch (error) {
-    console.error("[TB Widget] 插件脚本加载失败", error);
-    root.innerHTML = `<div style="padding:12px;color:#ff7875">${String(error)}</div>`;
     window.host?.ready?.();
     return;
   }

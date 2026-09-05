@@ -20,7 +20,7 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             FindWindowExW, FindWindowW, GetClassNameW, GetClientRect, GetCursorPos,
             GetParent, GetTopWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
-            IsWindow, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+            IsWindow, IsWindowVisible, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow,
             WindowFromPoint, GWL_EXSTYLE, GWL_STYLE, GW_HWNDNEXT, HWND_TOP, SWP_FRAMECHANGED,
             SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW,
             SW_SHOWNOACTIVATE, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
@@ -103,7 +103,9 @@ pub(crate) struct InteractiveRegion {
 }
 
 fn record_native_event(message: String) {
-    println!("[TBWidget native] {message}");
+    if !crate::debug_logging_enabled() {
+        return;
+    }
     let queue = NATIVE_EVENT_QUEUE.get_or_init(|| Mutex::new(VecDeque::with_capacity(64)));
     if let Ok(mut queue) = queue.try_lock() {
         if queue.len() >= 64 {
@@ -576,6 +578,138 @@ unsafe fn collect_descendant_windows(
     }
 }
 
+
+unsafe fn rect_text(rect: &RECT) -> String {
+    format!(
+        "({},{}-{},{} {}x{})",
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        rect.right - rect.left,
+        rect.bottom - rect.top
+    )
+}
+
+unsafe fn describe_window_detailed(hwnd: HWND) -> String {
+    if hwnd.is_null() || IsWindow(hwnd) == 0 {
+        return format!("invalid hwnd={:#x}", hwnd as usize);
+    }
+
+    let parent = GetParent(hwnd);
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+    let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    let visible = IsWindowVisible(hwnd) != 0;
+    let dpi = GetDpiForWindow(hwnd);
+    let mut window_rect: RECT = std::mem::zeroed();
+    let mut client_rect: RECT = std::mem::zeroed();
+    SetLastError(0);
+    let window_rect_ok = GetWindowRect(hwnd, &mut window_rect) != 0;
+    let window_rect_error = GetLastError();
+    SetLastError(0);
+    let client_rect_ok = GetClientRect(hwnd, &mut client_rect) != 0;
+    let client_rect_error = GetLastError();
+    let window_rect_text = if window_rect_ok { rect_text(&window_rect) } else { format!("<GetWindowRect err={window_rect_error}>") };
+    let client_rect_text = if client_rect_ok { rect_text(&client_rect) } else { format!("<GetClientRect err={client_rect_error}>") };
+
+    format!(
+        "class={} hwnd={:#x} parent={:#x} visible={} dpi={} style=0x{:08X} ex=0x{:08X} flags=[child:{} visible:{} popup:{} exTransparent:{} tool:{} app:{} noActivate:{}] win={} client={}",
+        window_class_name(hwnd),
+        hwnd as usize,
+        parent as usize,
+        visible,
+        dpi,
+        style,
+        ex_style,
+        style & WS_CHILD != 0,
+        style & WS_VISIBLE != 0,
+        style & WS_POPUP != 0,
+        ex_style & WS_EX_TRANSPARENT != 0,
+        ex_style & WS_EX_TOOLWINDOW != 0,
+        ex_style & WS_EX_APPWINDOW != 0,
+        ex_style & WS_EX_NOACTIVATE != 0,
+        window_rect_text,
+        client_rect_text
+    )
+}
+
+/// 输出任务栏窗口、组件外层 HWND 及 WebView2/Chromium 子窗口的完整显示状态。
+/// 主要用于区分“SetParent 成功但被遮挡/尺寸异常”和“WebView 内容没有创建/没有显示”。
+#[allow(dead_code)]
+pub fn diagnostic_snapshot(window: &WebviewWindow, stage: &str) -> Result<Vec<String>, String> {
+    if !crate::debug_logging_enabled() {
+        return Ok(Vec::new());
+    }
+    let native = window
+        .hwnd()
+        .map_err(|error| format!("无法获取组件窗口句柄：{error}"))?;
+    let widget_hwnd = native.0 as HWND;
+    let taskbar_hwnd = find_primary_taskbar()?;
+
+    unsafe {
+        let mut lines = Vec::new();
+        lines.push(format!("diag stage={stage} widget [{}]", describe_window_detailed(widget_hwnd)));
+        lines.push(format!("diag stage={stage} taskbar [{}]", describe_window_detailed(taskbar_hwnd)));
+        lines.push(format!(
+            "diag stage={stage} relation parent={:#x} expected={:#x} parent_ok={} top_child={:#x} widget_is_top={}",
+            GetParent(widget_hwnd) as usize,
+            taskbar_hwnd as usize,
+            GetParent(widget_hwnd) == taskbar_hwnd,
+            GetTopWindow(taskbar_hwnd) as usize,
+            GetTopWindow(taskbar_hwnd) == widget_hwnd
+        ));
+
+        let mut descendants = Vec::new();
+        collect_descendant_windows(
+            widget_hwnd,
+            DESCENDANT_SCAN_DEPTH,
+            DESCENDANT_SCAN_LIMIT,
+            &mut descendants,
+        );
+        lines.push(format!("diag stage={stage} descendants={}", descendants.len()));
+        for (index, hwnd) in descendants.into_iter().enumerate() {
+            lines.push(format!(
+                "diag stage={stage} child#{index} [{}]",
+                describe_window_detailed(hwnd)
+            ));
+        }
+
+        let mut direct_child = GetTopWindow(taskbar_hwnd);
+        for index in 0..16usize {
+            if direct_child.is_null() || IsWindow(direct_child) == 0 {
+                break;
+            }
+            lines.push(format!(
+                "diag stage={stage} taskbar-child#{index} [{}]{}",
+                describe_window_detailed(direct_child),
+                if direct_child == widget_hwnd { " <WIDGET>" } else { "" }
+            ));
+            direct_child = GetWindow(direct_child, GW_HWNDNEXT);
+        }
+
+        let mut widget_rect: RECT = std::mem::zeroed();
+        if GetWindowRect(widget_hwnd, &mut widget_rect) != 0
+            && widget_rect.right > widget_rect.left
+            && widget_rect.bottom > widget_rect.top
+        {
+            let center = POINT {
+                x: widget_rect.left + (widget_rect.right - widget_rect.left) / 2,
+                y: widget_rect.top + (widget_rect.bottom - widget_rect.top) / 2,
+            };
+            let hit = WindowFromPoint(center);
+            lines.push(format!(
+                "diag stage={stage} center-hit point=({}, {}) hit=[{}] chain=[{}]",
+                center.x,
+                center.y,
+                describe_window_compact(hit),
+                describe_parent_chain_compact(hit, 8)
+            ));
+        }
+
+        Ok(lines)
+    }
+}
+
 unsafe fn is_webview_input_window(hwnd: HWND) -> bool {
     let class_name = window_class_name(hwnd);
     class_name == "WRY_WEBVIEW"
@@ -658,6 +792,15 @@ pub fn attach(window: &WebviewWindow, _position: WidgetPosition) -> Result<(), S
 
         let original_style = GetWindowLongPtrW(widget_hwnd, GWL_STYLE);
         let original_ex_style = GetWindowLongPtrW(widget_hwnd, GWL_EXSTYLE);
+        record_native_event(format!(
+            "attach begin widget={:#x} taskbar={:#x} taskbar_client={} dpi={} original_style=0x{:08X} original_ex=0x{:08X}",
+            widget_hwnd as usize,
+            taskbar_hwnd as usize,
+            rect_text(&taskbar_rect),
+            dpi,
+            original_style as u32,
+            original_ex_style as u32
+        ));
 
         let child_style = ((original_style as u32
             & !(WS_POPUP
@@ -678,6 +821,12 @@ pub fn attach(window: &WebviewWindow, _position: WidgetPosition) -> Result<(), S
             | WS_EX_TRANSPARENT) as isize;
 
         set_window_style(widget_hwnd, GWL_STYLE, child_style, "无法设置子窗口样式")?;
+        record_native_event(format!(
+            "attach style widget={:#x} new_style=0x{:08X} readback=0x{:08X}",
+            widget_hwnd as usize,
+            child_style as u32,
+            GetWindowLongPtrW(widget_hwnd, GWL_STYLE) as u32
+        ));
         if let Err(error) = set_window_style(
             widget_hwnd,
             GWL_EXSTYLE,
@@ -687,6 +836,12 @@ pub fn attach(window: &WebviewWindow, _position: WidgetPosition) -> Result<(), S
             let _ = set_window_style(widget_hwnd, GWL_STYLE, original_style, "恢复窗口样式失败");
             return Err(error);
         }
+        record_native_event(format!(
+            "attach ex-style widget={:#x} new_ex=0x{:08X} readback=0x{:08X}",
+            widget_hwnd as usize,
+            child_ex_style as u32,
+            GetWindowLongPtrW(widget_hwnd, GWL_EXSTYLE) as u32
+        ));
 
         // 显式清掉 WS_DISABLED；避免依赖当前 windows-sys 未导出的 EnableWindow 绑定。
 
@@ -704,6 +859,14 @@ pub fn attach(window: &WebviewWindow, _position: WidgetPosition) -> Result<(), S
         SetLastError(0);
         let previous_parent = SetParent(widget_hwnd, taskbar_hwnd);
         let parent_error = GetLastError();
+        record_native_event(format!(
+            "attach SetParent widget={:#x} target={:#x} previous={:#x} last_error={} readback_parent={:#x}",
+            widget_hwnd as usize,
+            taskbar_hwnd as usize,
+            previous_parent as usize,
+            parent_error,
+            GetParent(widget_hwnd) as usize
+        ));
         if previous_parent.is_null() && parent_error != 0 {
             let _ = set_window_style(widget_hwnd, GWL_STYLE, original_style, "恢复窗口样式失败");
             let _ = set_window_style(
@@ -717,7 +880,8 @@ pub fn attach(window: &WebviewWindow, _position: WidgetPosition) -> Result<(), S
             ));
         }
 
-        if SetWindowPos(
+        SetLastError(0);
+        let set_pos_result = SetWindowPos(
             widget_hwnd,
             HWND_TOP,
             widget_x,
@@ -725,9 +889,20 @@ pub fn attach(window: &WebviewWindow, _position: WidgetPosition) -> Result<(), S
             widget_width,
             taskbar_height,
             SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-        ) == 0
+        );
+        let set_pos_error = GetLastError();
+        record_native_event(format!(
+            "attach SetWindowPos result={} last_error={} requested=({},0 {}x{}) top_after={:#x}",
+            set_pos_result,
+            set_pos_error,
+            widget_x,
+            widget_width,
+            taskbar_height,
+            GetTopWindow(taskbar_hwnd) as usize
+        ));
+        if set_pos_result == 0
         {
-            let error = last_error("无法定位任务栏组件");
+            let error = format!("无法定位任务栏组件，Win32 错误码：{set_pos_error}");
             let _ = SetParent(widget_hwnd, previous_parent);
             let _ = set_window_style(widget_hwnd, GWL_STYLE, original_style, "恢复窗口样式失败");
             let _ = set_window_style(
@@ -739,8 +914,21 @@ pub fn attach(window: &WebviewWindow, _position: WidgetPosition) -> Result<(), S
             return Err(error);
         }
 
-        ShowWindow(widget_hwnd, SW_SHOWNOACTIVATE);
+        let show_previous_visible = ShowWindow(widget_hwnd, SW_SHOWNOACTIVATE);
+        record_native_event(format!(
+            "attach ShowWindow previous_visible={} now_visible={} style=0x{:08X} ex=0x{:08X}",
+            show_previous_visible,
+            IsWindowVisible(widget_hwnd) != 0,
+            GetWindowLongPtrW(widget_hwnd, GWL_STYLE) as u32,
+            GetWindowLongPtrW(widget_hwnd, GWL_EXSTYLE) as u32
+        ));
         boost_z_order(widget_hwnd)?;
+        record_native_event(format!(
+            "attach after-boost top={:#x} is_top={} detail=[{}]",
+            GetTopWindow(taskbar_hwnd) as usize,
+            GetTopWindow(taskbar_hwnd) == widget_hwnd,
+            describe_window_detailed(widget_hwnd)
+        ));
         if let Err(error) = ensure_low_level_mouse_hook(widget_hwnd) {
             record_native_event(format!("mouse-hook install failed: {error}"));
         }
@@ -900,7 +1088,8 @@ unsafe fn place_widget(
     let physical_width = taskbar_width;
     let widget_x = 0;
 
-    if SetWindowPos(
+    SetLastError(0);
+    let set_pos_result = SetWindowPos(
         widget_hwnd,
         HWND_TOP,
         widget_x,
@@ -908,9 +1097,11 @@ unsafe fn place_widget(
         physical_width,
         taskbar_height,
         SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER,
-    ) == 0
+    );
+    let set_pos_error = GetLastError();
+    if set_pos_result == 0
     {
-        return Err(last_error("无法应用页面宽度"));
+        return Err(format!("无法应用页面宽度，Win32 错误码：{set_pos_error}"));
     }
     boost_z_order(widget_hwnd)?;
     Ok(())

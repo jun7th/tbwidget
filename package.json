@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "sync:kui": "node scripts/sync-kui-vendor.mjs",
+    "check:plugins": "node scripts/check-bundled-plugins.mjs",
     "postinstall": "npm run sync:kui",
-    "predev": "npm run sync:kui",
+    "predev": "npm run check:plugins && npm run sync:kui",
     "dev": "vite",
-    "prebuild": "npm run sync:kui",
+    "prebuild": "npm run check:plugins && npm run sync:kui",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

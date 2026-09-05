@@ -2,10 +2,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { nextTick, onMounted, onUnmounted, ref } from "vue";
-import { buildPluginBridgeScript } from "../plugins/bridge";
-import { buildPluginDocument } from "../plugins/document";
-import { handlePluginRequest } from "../plugins/hostRequest";
-import type { PluginBundle } from "../plugins/types";
+import PluginSurface from "./PluginSurface.vue";
+import type { PluginDescriptor } from "../plugins/types";
 
 type NativeTaskbarPoint = { x: number; y: number };
 type NativeTaskbarClick = NativeTaskbarPoint & { regionId: string };
@@ -14,27 +12,21 @@ type NativeTaskbarPointerPoll = {
   cursorRegionId?: string | null;
   leftButtonDown: boolean;
   leftDowns: NativeTaskbarClick[];
+  rightClicks: NativeTaskbarClick[];
 };
 
-type PluginMessage = {
-  tbwidgetPlugin?: boolean;
-  pluginId?: string;
-  requestId?: number;
-  method?: string;
-  args?: unknown[];
-  width?: number;
-  height?: number;
-};
-
-const plugins = ref<PluginBundle[]>([]);
+const plugins = ref<PluginDescriptor[]>([]);
 const frameWidths = ref<Record<string, number>>({});
 const panelRevisions = ref<Record<string, number>>({});
 const hoveredPluginId = ref("");
 const draggedPluginId = ref("");
-const frames = new Map<string, HTMLIFrameElement>();
 const slots = new Map<string, HTMLElement>();
 const unlisteners: UnlistenFn[] = [];
 let nativeClickTimer: number | undefined;
+let interactiveRegionFrame: number | undefined;
+let startupRetryTimer: number | undefined;
+let startupRetryCount = 0;
+let initialPluginLoadComplete = false;
 let nativeClickPolling = false;
 let lastPopupPluginId = "";
 let lastPopupAt = 0;
@@ -42,13 +34,55 @@ let lastPointerZone = "__init__";
 let suppressedHoverPluginId = "";
 let dragMoved = false;
 const INPUT_DEBUG_LOGS = false;
+let debugLogsEnabled = import.meta.env.DEV;
 
-function srcdoc(plugin: PluginBundle) {
-  return buildPluginDocument("panel", plugin.panelHtml, buildPluginBridgeScript(plugin, "panel"), plugin.panelJs);
+type PluginDiagState = {
+  mainTs?: string;
+  appCreate?: boolean;
+  appMounted?: boolean;
+  panelsSetup?: boolean;
+  panelsMounted?: boolean;
+  loadBegin?: number;
+  invokeBegin?: number;
+  invokeDone?: number;
+  invokeError?: string;
+  descriptorCount?: number;
+  enabledCount?: number;
+  renderedPluginCount?: number;
+  domSlotCount?: number;
+  slotRefCount?: number;
+  lastStep?: string;
+};
+
+function pluginDiag(): PluginDiagState {
+  const host = window as Window & { __TBWIDGET_PLUGIN_DIAG__?: PluginDiagState };
+  return (host.__TBWIDGET_PLUGIN_DIAG__ ??= {});
 }
 
-async function openPluginPopup(plugin: PluginBundle, rect: DOMRect) {
-  if (!plugin.popupHtml || !plugin.popupJs) return;
+function markDiag(step: string, values: Partial<PluginDiagState> = {}) {
+  const diag = pluginDiag();
+  Object.assign(diag, values, { lastStep: step });
+}
+
+markDiag("PluginPanels setup entered", { panelsSetup: true });
+
+function errorText(error: unknown) {
+  if (error instanceof Error) return `${error.name}: ${error.message}${error.stack ? ` | stack=${error.stack.replace(/\s+/g, " ")}` : ""}`;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
+async function uiDebug(message: string) {
+  if (!debugLogsEnabled) return;
+  console.info(`[plugins-ui] ${message}`);
+  try {
+    await invoke("log_taskbar_ui_debug", { message: `[plugins-ui] ${message}` });
+  } catch (error) {
+    console.error("[plugins-ui] log_taskbar_ui_debug failed", error);
+  }
+}
+
+async function openPluginPopup(plugin: PluginDescriptor, rect: DOMRect) {
+  if (!plugin.popup) return;
   const now = performance.now();
   if (plugin.id === lastPopupPluginId && now - lastPopupAt < 300) return;
   lastPopupPluginId = plugin.id;
@@ -63,11 +97,11 @@ async function openPluginPopup(plugin: PluginBundle, rect: DOMRect) {
 function pluginByRegionId(regionId?: string | null, requirePopup = false) {
   if (!regionId?.startsWith("plugin:")) return null;
   const pluginId = regionId.slice("plugin:".length);
-  return plugins.value.find(item => item.id === pluginId && item.enabled && (!requirePopup || (item.popupHtml && item.popupJs))) ?? null;
+  return plugins.value.find(item => item.id === pluginId && item.enabled && (!requirePopup || !!item.popup)) ?? null;
 }
 
 function pluginAtPoint(point: NativeTaskbarPoint, requirePopup = false) {
-  for (const plugin of plugins.value.filter(item => item.enabled && (!requirePopup || (item.popupHtml && item.popupJs)))) {
+  for (const plugin of plugins.value.filter(item => item.enabled && (!requirePopup || !!item.popup))) {
     const slot = slots.get(plugin.id);
     if (!slot) continue;
     const rect = slot.getBoundingClientRect();
@@ -91,7 +125,7 @@ function movePluginNearTarget(dragId: string, targetId: string, cursorX: number)
   current.splice(insertIndex, 0, moved);
   if (current.every((item, index) => item.id === plugins.value[index]?.id)) return false;
   plugins.value = current;
-  void nextTick().then(() => window.dispatchEvent(new CustomEvent("tbwidget-interactive-regions-changed")));
+  void nextTick().then(requestInteractiveRegionSync);
   return true;
 }
 
@@ -129,6 +163,17 @@ async function pollNativePointer() {
 
     hoveredPluginId.value = nextHoveredPluginId;
 
+    // 右键只触发 TBWidget 自己的插件 popup，不使用 WebView/Windows 默认上下文菜单。
+    for (const click of pointer.rightClicks) {
+      const popupPlugin = pluginByRegionId(click.regionId, true);
+      const popupSlot = popupPlugin ? slots.get(popupPlugin.id) : null;
+      if (popupPlugin && popupSlot) {
+        suppressedHoverPluginId = popupPlugin.id;
+        hoveredPluginId.value = "";
+        void openPluginPopup(popupPlugin, popupSlot.getBoundingClientRect());
+      }
+    }
+
     for (const down of pointer.leftDowns) {
       const plugin = pluginByRegionId(down.regionId);
       if (plugin) {
@@ -160,56 +205,121 @@ async function pollNativePointer() {
   }
 }
 
-async function onMessage(event: MessageEvent<PluginMessage>) {
-  const message = event.data;
-  if (!message?.tbwidgetPlugin || !message.pluginId || !message.method) return;
-  const plugin = plugins.value.find(item => item.id === message.pluginId && item.enabled);
-  if (!plugin) return;
-  const frame = frames.get(plugin.id);
-  if (!frame || event.source !== frame.contentWindow) return;
-
-  if (message.method === "host.resize") {
-    const width = Math.max(24, Math.min(800, Math.ceil(Number(message.width) || 0)));
-    frameWidths.value = { ...frameWidths.value, [plugin.id]: width };
-    await nextTick();
-    window.dispatchEvent(new CustomEvent("tbwidget-interactive-regions-changed"));
-    return;
-  }
-
-  if (!message.requestId) return;
-  try {
-    const value = await handlePluginRequest(plugin, message.method, Array.isArray(message.args) ? message.args : []);
-    frame.contentWindow?.postMessage({ tbwidgetHost: true, pluginId: plugin.id, requestId: message.requestId, ok: true, value }, "*");
-  } catch (error) {
-    frame.contentWindow?.postMessage({ tbwidgetHost: true, pluginId: plugin.id, requestId: message.requestId, ok: false, error: String(error) }, "*");
-  }
+function onPanelResize(pluginId: string, requestedWidth: number) {
+  const width = Math.max(24, Math.min(800, Math.ceil(Number(requestedWidth) || 0)));
+  if ((frameWidths.value[pluginId] || 48) === width) return;
+  frameWidths.value = { ...frameWidths.value, [pluginId]: width };
+  void nextTick().then(requestInteractiveRegionSync);
 }
 
-function setFrameRef(pluginId: string, element: unknown) {
-  if (element instanceof HTMLIFrameElement) frames.set(pluginId, element);
-  else frames.delete(pluginId);
-}
 
 function requestInteractiveRegionSync() {
-  window.requestAnimationFrame(() => window.dispatchEvent(new CustomEvent("tbwidget-interactive-regions-changed")));
+  if (interactiveRegionFrame !== undefined) return;
+  interactiveRegionFrame = window.requestAnimationFrame(async () => {
+    interactiveRegionFrame = undefined;
+    await invoke("set_widget_width", { width: Math.max(1, window.innerWidth) }).catch(() => undefined);
+    window.dispatchEvent(new CustomEvent("tbwidget-interactive-regions-changed"));
+  });
 }
 
 function setSlotRef(pluginId: string, element: unknown) {
-  if (element instanceof HTMLElement) slots.set(pluginId, element);
-  else slots.delete(pluginId);
+  if (element instanceof HTMLElement) {
+    if (slots.get(pluginId) === element) return;
+    slots.set(pluginId, element);
+  } else if (!slots.delete(pluginId)) {
+    return;
+  }
+  markDiag("setSlotRef", { slotRefCount: slots.size, domSlotCount: document.querySelectorAll(".plugin-slot").length });
   requestInteractiveRegionSync();
 }
 
+function clearStartupRetry() {
+  if (startupRetryTimer === undefined) return;
+  window.clearTimeout(startupRetryTimer);
+  startupRetryTimer = undefined;
+}
+
+function scheduleStartupRetry() {
+  if (initialPluginLoadComplete || startupRetryTimer !== undefined || startupRetryCount >= 20) return;
+  const delay = Math.min(500, 60 + startupRetryCount * 40);
+  startupRetryCount += 1;
+  startupRetryTimer = window.setTimeout(() => {
+    startupRetryTimer = undefined;
+    void loadPlugins();
+  }, delay);
+}
+
 async function loadPlugins() {
-  if (draggedPluginId.value) return;
-  plugins.value = await invoke<PluginBundle[]>("list_plugins");
-  await nextTick();
-  window.dispatchEvent(new CustomEvent("tbwidget-interactive-regions-changed"));
+  if (draggedPluginId.value) {
+    markDiag("loadPlugins skipped: dragging");
+    await uiDebug(`loadPlugins skipped dragged=${draggedPluginId.value}`);
+    return;
+  }
+
+  const diag = pluginDiag();
+  markDiag("loadPlugins entered", { loadBegin: (diag.loadBegin ?? 0) + 1, invokeError: "" });
+  await uiDebug(`loadPlugins begin env=${import.meta.env.MODE}/${import.meta.env.PROD ? "prod" : "dev"} href=${location.href}`);
+
+  try {
+    const beforeInvoke = pluginDiag();
+    markDiag("before invoke(list_plugins)", { invokeBegin: (beforeInvoke.invokeBegin ?? 0) + 1 });
+    await uiDebug("before invoke(list_plugins)");
+
+    const descriptors = await invoke<PluginDescriptor[]>("list_plugins");
+
+    const descriptorCount = Array.isArray(descriptors) ? descriptors.length : -1;
+    const enabledCount = Array.isArray(descriptors) ? descriptors.filter(item => item.enabled).length : -1;
+    const afterInvoke = pluginDiag();
+    markDiag("after invoke(list_plugins)", {
+      invokeDone: (afterInvoke.invokeDone ?? 0) + 1,
+      descriptorCount,
+      enabledCount,
+    });
+    await uiDebug(`list_plugins returned isArray=${Array.isArray(descriptors)} count=${descriptorCount} enabled=${enabledCount}`);
+
+    for (const plugin of Array.isArray(descriptors) ? descriptors : []) {
+      await uiDebug(`plugin id=${plugin.id} enabled=${plugin.enabled} panel=${plugin.panel ?? "-"} popup=${plugin.popup ?? "-"}`);
+    }
+
+    markDiag("before plugins.value assignment");
+    plugins.value = Array.isArray(descriptors) ? descriptors : [];
+    initialPluginLoadComplete = true;
+    clearStartupRetry();
+    markDiag("after plugins.value assignment", { renderedPluginCount: plugins.value.length });
+    await nextTick();
+
+    const rendered = [...document.querySelectorAll<HTMLElement>(".plugin-slot")].map(slot => {
+      const rect = slot.getBoundingClientRect();
+      return `${slot.dataset.taskbarRegionId ?? "?"}:${rect.width.toFixed(1)}x${rect.height.toFixed(1)}`;
+    });
+    markDiag("after plugin DOM render", {
+      renderedPluginCount: plugins.value.length,
+      slotRefCount: slots.size,
+      domSlotCount: rendered.length,
+    });
+    await uiDebug(`render complete plugins=${plugins.value.length} slots=${slots.size} domSlots=${rendered.length} [${rendered.join(", ")}]`);
+    requestInteractiveRegionSync();
+  } catch (error) {
+    const text = errorText(error);
+    plugins.value = [];
+    markDiag("loadPlugins FAILED", {
+      invokeError: text,
+      renderedPluginCount: 0,
+      domSlotCount: document.querySelectorAll(".plugin-slot").length,
+      slotRefCount: slots.size,
+    });
+    await uiDebug(`loadPlugins FAILED ${text}`);
+    console.error("加载任务栏插件失败", error);
+    scheduleStartupRetry();
+  }
 }
 
 onMounted(async () => {
-  window.addEventListener("message", onMessage);
-  await loadPlugins();
+  debugLogsEnabled ||= await invoke<boolean>("get_debug_mode").catch(() => false);
+  markDiag("PluginPanels onMounted entered", { panelsMounted: true });
+  await uiDebug("PluginPanels mounted");
+
+  // 先监听，再做首次读取，避免启动阶段 plugins-changed 正好发生在两者之间。
   unlisteners.push(await listen("plugins-changed", loadPlugins));
   unlisteners.push(await listen<{ pluginId: string; key: string }>("plugin-storage-changed", event => {
     if (event.payload.key !== "settings") return;
@@ -217,36 +327,42 @@ onMounted(async () => {
     panelRevisions.value = { ...panelRevisions.value, [pluginId]: (panelRevisions.value[pluginId] ?? 0) + 1 };
     requestInteractiveRegionSync();
   }));
+
+  markDiag("before initial loadPlugins");
+  await loadPlugins();
+  markDiag("after initial loadPlugins");
   nativeClickTimer = window.setInterval(() => void pollNativePointer(), 40);
 });
 
 onUnmounted(() => {
-  window.removeEventListener("message", onMessage);
   if (nativeClickTimer !== undefined) window.clearInterval(nativeClickTimer);
+  clearStartupRetry();
+  if (interactiveRegionFrame !== undefined) window.cancelAnimationFrame(interactiveRegionFrame);
   unlisteners.forEach(unlisten => unlisten());
 });
 </script>
 
 <template>
   <div
-    v-for="plugin in plugins.filter(item => item.enabled && item.panelHtml.trim().length > 0)"
+    v-for="plugin in plugins.filter(item => item.enabled && !!item.panel)"
     :key="`${plugin.id}:${panelRevisions[plugin.id] ?? 0}`"
     :ref="element => setSlotRef(plugin.id, element)"
     data-taskbar-interactive
     :data-taskbar-region-id="`plugin:${plugin.id}`"
     class="plugin-slot"
     :class="{
-      'plugin-slot--popup': !!plugin.popupHtml && !!plugin.popupJs,
+      'plugin-slot--popup': !!plugin.popup,
       'plugin-slot--hovered': hoveredPluginId === plugin.id,
       'plugin-slot--dragging': draggedPluginId === plugin.id,
     }"
     :style="{ width: `${frameWidths[plugin.id] || 48}px` }"
   >
-    <iframe
-      :ref="element => setFrameRef(plugin.id, element)"
+    <PluginSurface
       class="plugin-panel"
-      :srcdoc="srcdoc(plugin)"
-      sandbox="allow-scripts"
+      :plugin="plugin"
+      surface="panel"
+      :revision="panelRevisions[plugin.id] ?? 0"
+      @resize="width => onPanelResize(plugin.id, width)"
     />
   </div>
 </template>

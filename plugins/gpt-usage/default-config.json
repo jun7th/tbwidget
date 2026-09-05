@@ -1,0 +1,9 @@
+{
+  "settings": {
+    "authPath": "~/.codex/auth.json",
+    "displayMode": "remaining",
+    "proxyUrl": "",
+    "refreshSeconds": 60,
+    "windowMode": "both"
+  }
+}

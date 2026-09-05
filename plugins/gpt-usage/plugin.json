@@ -1,15 +1,16 @@
 {
-  "manifestVersion": 1,
-  "id": "gpt",
+  "manifestVersion": 2,
+  "id": "gpt-usage",
   "name": "GPT用量",
-  "version": "2.1.1",
+  "description": "显示 Codex / ChatGPT 的 5 小时与每周用量。",
+  "version": "1.0.0",
+  "builtin": false,
   "panel": "panel.html",
   "popup": "popup.html",
-  "settings": "settings.js",
+  "settings": "settings.html",
   "permissions": [
     "http.request",
     "fs.read",
     "storage"
-  ],
-  "description": "显示 Codex / ChatGPT 的 5 小时与每周用量，支持自定义 auth.json 路径和代理。"
+  ]
 }

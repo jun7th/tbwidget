@@ -10,7 +10,7 @@ import { useWidgetConfig } from "../composables/useWidgetConfig";
 const root = ref<HTMLElement | null>(null);
 const startupEnabled = ref(false);
 const startupBusy = ref(false);
-const logPath = ref("widget.log");
+const logPath = ref("save/log/YYYYMMDD.log");
 const positionOptions = [
   { label: "左侧", value: "left" },
   { label: "右侧", value: "right" },
@@ -46,9 +46,9 @@ async function startWindowDrag(event: MouseEvent) {
 onMounted(async () => {
   await loadConfig();
   startupEnabled.value = await invoke<boolean>("get_startup_enabled").catch(() => false);
-  logPath.value = await invoke<string>("get_widget_log_path").catch(() => "widget.log");
+  logPath.value = await invoke<string>("get_widget_log_path").catch(() => "save/log/YYYYMMDD.log");
   const win = getCurrentWindow();
-  await win.setAlwaysOnTop(true).catch(() => undefined);
+  await win.setAlwaysOnTop(false).catch(() => undefined);
   unlistenClose = await win.onCloseRequested(event => { event.preventDefault(); void invoke("hide_settings_window"); });
   unlisteners.push(await listen("settings-resize-requested", () => autoResize.schedule(true)));
   autoResize.start();
@@ -64,7 +64,10 @@ onUnmounted(() => {
 <template>
   <main ref="root" class="settings-page">
     <header class="settings-titlebar" @mousedown="startWindowDrag">
-      <h1 class="settings-title">TB Widget 设置</h1>
+      <h1 class="settings-title">
+        <img src="/icon.png" width="24" />
+        TB Widget 设置
+      </h1>
       <k-button class="settings-close" type="text" aria-label="关闭设置" @mousedown.stop @click="hideSettings">×</k-button>
     </header>
 
@@ -77,12 +80,12 @@ onUnmounted(() => {
             <k-switch :model-value="startupEnabled" :loading="startupBusy" @change="setStartup" size="small"/>
           </div>
           <div class="ui-row">
-            <span class="ui-label">任务栏位置</span>
+            <span class="ui-label">位置</span>
             <k-radio-group
               :model-value="config.position"
               :options="positionOptions"
               type="button"
-              theme="card"
+              theme="fill"
               @change="setPosition"
             />
           </div>
@@ -102,7 +105,7 @@ onUnmounted(() => {
 <style scoped>
 .settings-page { width: 520px; min-height: 100%; overflow-y: auto; background: var(--kui-color-bg, #141414); }
 .settings-titlebar { height: 44px; display:flex; align-items:center; justify-content:space-between; padding:0 8px 0 16px; border-bottom:1px solid var(--kui-color-border, rgba(255,255,255,.1)); cursor:default; }
-.settings-title { margin:0; font-size:14px; line-height:1; font-weight:600; }
+.settings-title { margin:0; font-size:14px; line-height:1; font-weight:600; display: flex; align-items: center; gap: 8px; }
 .settings-close { flex:0 0 auto; font-size:20px; line-height:1; }
 .settings-content { padding: 0 16px 16px; }
 .settings-first-section { margin-top: 16px; }

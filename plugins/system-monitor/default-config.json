@@ -1,0 +1,14 @@
+{
+  "settings": {
+    "cpu": true,
+    "disk": true,
+    "diskUsage": false,
+    "fan": false,
+    "frequency": false,
+    "logical": false,
+    "memory": true,
+    "network": true,
+    "refreshMs": 1000,
+    "temperature": false
+  }
+}

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN" theme-mode="dark" data-tb-surface="settings">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <link rel="stylesheet" href="/_host/vendor/kui-vue.css">
+  <link rel="stylesheet" href="./common.css">
+</head>
+<body theme-mode="dark">
+  <div id="plugin-root">
+    <div class="plugin-settings-page">
+      <k-card class="ui-card" theme="fill">
+        <div class="ui-list">
+          <div class="ui-row ui-row--stacked">
+            <div class="ui-copy field-copy">
+              <span class="ui-label">auth.json 路径</span>
+              <span class="ui-muted">路径由插件定义；~ 会由通用文件接口展开为当前用户目录。</span>
+            </div>
+            <k-input v-model="settings.authPath" placeholder="~/.codex/auth.json" />
+          </div>
+          <div class="ui-row ui-row--stacked">
+            <div class="ui-copy field-copy"><span class="ui-label">代理</span></div>
+            <k-input v-model="settings.proxyUrl" placeholder="例如 http://127.0.0.1:7890" />
+          </div>
+        </div>
+      </k-card>
+
+      <div class="ui-actions settings-actions">
+        <k-button @click="useDefaultPath">使用默认路径</k-button>
+        <k-button type="primary" :loading="testing" @click="testApi">测试接口</k-button>
+      </div>
+      <div v-if="status" class="ui-status" :class="{'ui-status--error': statusError}">{{ status }}</div>
+      <div class="ui-actions ui-actions--end footer-actions">
+        <k-button theme="plain" @click="cancel">取消</k-button>
+        <k-button type="primary" :loading="saving" @click="save">确定</k-button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/_host/vendor/vue.global.prod.js"></script>
+  <script src="/_host/vendor/dayjs.min.js"></script>
+  <script src="/_host/vendor/kui-vue.umd.js"></script>
+  <script src="./common.js"></script>
+  <script>
+    const api = window.GptUsage;
+    window.tbPlugin = {
+      data: () => ({ settings: { ...api.defaults }, status: "", statusError: false, saving: false, testing: false }),
+      async mounted() {
+        this.settings = api.normalizeSettings(await host.storage.get("settings", {}));
+      },
+      methods: {
+        useDefaultPath() {
+          this.settings.authPath = api.defaults.authPath;
+          this.status = `已切换为默认路径：${api.defaults.authPath}`;
+          this.statusError = false;
+        },
+        async testApi() {
+          this.testing = true; this.status = "正在测试接口…"; this.statusError = false;
+          try {
+            const usage = await api.fetchUsage(api.normalizeSettings(this.settings));
+            this.status = `HTTP ${usage.httpStatus} · 接口正常：5 小时余量 ${api.formatPercent(api.clampPercent(usage.primary_remaining_percent))}，1 周余量 ${api.formatPercent(api.clampPercent(usage.weekly_remaining_percent))}`;
+          } catch (error) {
+            const text = String(error);
+            this.status = /HTTP\s+\d+/i.test(text) ? `接口测试失败：${text}` : `HTTP -- · 接口测试失败：${text}`;
+            this.statusError = true;
+          } finally { this.testing = false; }
+        },
+        async save() {
+          this.saving = true; this.status = "正在保存…"; this.statusError = false;
+          const next = api.normalizeSettings(this.settings);
+          try {
+            await api.accessToken(next.authPath);
+            await host.storage.set("settings", next);
+            this.settings = next;
+            this.status = `设置已保存：${next.authPath}`;
+            void host.settings.close();
+          } catch (error) {
+            this.status = `auth.json 不可用：${String(error)}`;
+            this.statusError = true;
+          } finally { this.saving = false; host.ready(); }
+        },
+        cancel() { void host.settings.close(); },
+      },
+    };
+  </script>
+  <script src="/_host/plugin-vue-runtime.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "widget": {
+    "position": "left",
+    "language": "zh"
+  },
+  "plugins": {
+    "system-monitor": {
+      "enabled": true,
+      "order": 1,
+      "directory": "system-monitor"
+    }
+  }
+}

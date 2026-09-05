@@ -1,3 +1,11 @@
+<!doctype html>
+<html lang="zh-CN" theme-mode="dark" data-tb-surface="popup">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link rel="stylesheet" href="/_host/vendor/kui-vue.css">
+<link rel="stylesheet" href="./common.css">
 <style>
   html,
   body,
@@ -150,6 +158,10 @@
     color: #ff7875
   }
 </style>
+</head>
+<body theme-mode="dark">
+<div id="plugin-root">
+
 <div class="popup">
   <div class="grid">
     <div class="metric" :class="{'metric--disabled':!settings.cpu}" role="button" tabindex="0" @click="toggle('cpu')"
@@ -233,3 +245,45 @@
   </k-card>
   <div v-if="error" class="error">{{ error }}</div>
 </div>
+</div>
+
+<script src="/_host/vendor/vue.global.prod.js"></script>
+<script src="/_host/vendor/dayjs.min.js"></script>
+<script src="/_host/vendor/kui-vue.umd.js"></script>
+<script src="./common.js"></script>
+<script>
+const api = window.SystemMonitorPlugin;
+window.tbPlugin = {
+  data:()=>({settings:{...api.defaults},snapshot:null,error:"",timer:0,refreshOptions:[{label:"1 秒",value:"1000"},{label:"5 秒",value:"5000"},{label:"10 秒",value:"10000"}]}),
+  computed:{
+    memoryText(){const m=this.snapshot?.memory;return m?`${api.size(m.usedBytes)} / ${api.size(m.totalBytes)}`:"--";},
+    diskText(){const d=this.snapshot?.disk;return d?`${api.size(d.usedBytes)} / ${api.size(d.totalBytes)}`:"--";},
+    fanText(){const fan=this.snapshot?.fans?.[0];return fan&&Number.isFinite(Number(fan.rpm))?`${Math.round(Number(fan.rpm))} RPM`:"N/A";},
+  },
+  methods:{
+    pct:api.pct,
+    temp:api.temp,
+    frequency:api.frequency,
+    size:api.size,
+    rate:api.rate,
+    toggle(key){if(!api.toggleKeys.includes(key))return;void this.save({[key]:!this.settings[key]});},
+    async save(patch){
+      const before=this.settings;
+      const previousRefresh=before.refreshMs;
+      const next=api.normalize({...before,...patch});
+      this.settings=next;
+      try{await host.storage.set("settings",next);this.error="";}
+      catch(e){this.error=String(e);this.settings=before;return;}
+      if(next.refreshMs!==previousRefresh)this.restart();
+    },
+    async refresh(){try{this.snapshot=await host.system.metrics();this.error="";}catch(e){this.error=String(e);}},
+    restart(){if(this.timer)clearInterval(this.timer);this.timer=setInterval(()=>void this.refresh(),this.settings.refreshMs);},
+  },
+  async mounted(){this.settings=api.normalize(await host.storage.get("settings",{}));await this.refresh();this.restart();host.ready();},
+  beforeUnmount(){if(this.timer)clearInterval(this.timer);},
+};
+</script>
+<script src="/_host/plugin-vue-runtime.js"></script>
+
+</body>
+</html>

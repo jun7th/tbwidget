@@ -1,4 +1,4 @@
-export type PluginBundle = {
+export type PluginDescriptor = {
   id: string;
   name: string;
   description: string;
@@ -7,11 +7,10 @@ export type PluginBundle = {
   permissions: string[];
   enabled: boolean;
   order: number;
-  panelHtml: string;
-  panelJs: string;
-  popupHtml?: string | null;
-  popupJs?: string | null;
-  settingsJs?: string | null;
-  wasmBytes?: number[] | null;
+  panel?: string | null;
+  popup?: string | null;
+  settings?: string | null;
   builtin: boolean;
 };
+
+export type PluginSurfaceName = "panel" | "popup" | "settings";

@@ -1,3 +1,11 @@
+<!doctype html>
+<html lang="zh-CN" theme-mode="dark" data-tb-surface="popup">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link rel="stylesheet" href="/_host/vendor/kui-vue.css">
+<link rel="stylesheet" href="./common.css">
 <style>
   html,
   body,
@@ -111,6 +119,10 @@
   }
  
 </style>
+</head>
+<body theme-mode="dark">
+<div id="plugin-root">
+
 <div class="popup">
   <k-card theme="fill" class="usage-card" size="small" title="用量" bordered>
       <template #extra>
@@ -123,7 +135,7 @@
       <div class="usage-top"><span class="usage-heading"><span class="label">5 小时限额</span><span
             class="muted usage-reset">{{ durationText(primaryResetAt) }}</span></span><strong class="usage-value">{{
           formatPercent(primaryPercent) }}</strong></div>
-      <k-progress :percent="primaryPercent ?? 0" :show-info="false" size="small" />
+      <k-progress :percent="primaryPercent ?? 0" :show-info="false" size="small" color="#45d547" />
     </div>
     <div class="usage-row">
       <div class="usage-top"><span class="usage-heading"><span class="label">1 周限额</span><span
@@ -135,15 +147,83 @@
 
   <k-card theme="fill">
     <div class="list">
-      <div class="row"><span class="label">显示内容</span><k-radio-group :model-value="settings.displayMode"
-          :options="displayOptions" type="button" theme="card"  @change="value => savePopupSettings({ displayMode: value })" /></div>
+      <div class="row"><span class="label">显示内容</span><k-radio-group  :model-value="settings.displayMode"
+          :options="displayOptions" type="button" theme="fill"  @change="value => savePopupSettings({ displayMode: value })" /></div>
       <div class="row"><span class="label">任务栏限额</span><k-radio-group :model-value="settings.windowMode"
-          :options="windowOptions" type="button" theme="card"  @change="value => savePopupSettings({ windowMode: value })" /></div>
+          :options="windowOptions" type="button" theme="fill"  @change="value => savePopupSettings({ windowMode: value })" /></div>
       <div class="row"><span class="label">刷新时间</span><k-radio-group :model-value="String(settings.refreshSeconds)"
-          :options="refreshOptions" type="button" theme="card" 
+          :options="refreshOptions" type="button" theme="fill" 
           @change="value => savePopupSettings({ refreshSeconds: Number(value) })" /></div>
     </div>
   </k-card>
   <div v-if="error" class="error">{{ error }}</div>
   <div v-if="meta" class="muted">{{ meta }}</div>
 </div>
+</div>
+
+<script src="/_host/vendor/vue.global.prod.js"></script>
+<script src="/_host/vendor/dayjs.min.js"></script>
+<script src="/_host/vendor/kui-vue.umd.js"></script>
+<script src="./common.js"></script>
+<script>
+const api = window.GptUsage;
+window.tbPlugin = {
+  data() {
+    return {
+      settings: { ...api.defaults }, primaryPercent: null, weeklyPercent: null,
+      primaryResetAt: null, weeklyResetAt: null, lastUsage: null, lastFetchedAt: null,
+      meta: "", error: "", refreshing: false, timer: null, now: Date.now(),
+      displayOptions: [{label:"余量",value:"remaining"},{label:"用量",value:"used"}],
+      windowOptions: [{label:"5 小时",value:"primary"},{label:"1 周",value:"weekly"},{label:"两者",value:"both"}],
+      refreshOptions: [{label:"1 分钟",value:"60"},{label:"5 分钟",value:"300"}],
+    };
+  },
+  methods: {
+    formatPercent: api.formatPercent,
+    timeText(value) { return new Date(value).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }); },
+    durationText(resetMs) {
+      if (!resetMs) return "";
+      let seconds=Math.max(0,Math.ceil((resetMs-this.now)/1000)); if(seconds<=0)return "即将重置";
+      const days=Math.floor(seconds/86400);seconds%=86400;const hours=Math.floor(seconds/3600);seconds%=3600;const minutes=Math.floor(seconds/60);seconds%=60;
+      const parts=[];if(days)parts.push(`${days}天`);if(hours||days)parts.push(`${hours}小时`);if(minutes||hours||days)parts.push(`${minutes}分`);if(!days)parts.push(`${seconds}秒`);return `${parts.join(" ")} 后重置`;
+    },
+    renderUsage(usage, fetchedAt) {
+      this.lastUsage=usage||null; this.lastFetchedAt=fetchedAt||null;
+      this.primaryPercent=api.shownPercent(usage?.primary_remaining_percent,this.settings.displayMode);
+      this.weeklyPercent=api.shownPercent(usage?.weekly_remaining_percent,this.settings.displayMode);
+      this.primaryResetAt=api.normalizeResetMs(usage?.primary_reset_at); this.weeklyResetAt=api.normalizeResetMs(usage?.weekly_reset_at);
+      this.meta=fetchedAt?`更新时间：${this.timeText(fetchedAt)}`:"尚未刷新";
+    },
+    async savePopupSettings(patch) {
+      this.settings=api.normalizeSettings({...this.settings,...patch});
+      await host.storage.set("settings",this.settings);
+      if(this.lastUsage)this.renderUsage(this.lastUsage,this.lastFetchedAt);
+    },
+    resetUsage() { this.meta="重置用量属于插件业务，当前插件尚未实现。"; },
+    async refresh() {
+      this.refreshing=true; this.error="";
+      try {
+        this.settings=api.normalizeSettings({...this.settings,...await host.storage.get("settings",{})});
+        const usage=await api.fetchUsage(this.settings); const fetchedAt=Date.now();
+        await host.storage.set("usageCache", { usage, fetchedAt, configKey:`${this.settings.authPath}\n${this.settings.proxyUrl}` });
+        this.renderUsage(usage,fetchedAt);
+      } catch(error) { this.error=String(error); }
+      finally { this.refreshing=false; }
+    },
+  },
+  async mounted() {
+    this.settings=api.normalizeSettings(await host.storage.get("settings",{}));
+    const cached=await host.storage.get("usageCache",null);
+    if(cached?.usage)this.renderUsage(cached.usage,Number(cached.fetchedAt)||null);
+    const configKey=`${this.settings.authPath}\n${this.settings.proxyUrl}`;
+    const cacheFresh=Boolean(cached?.usage)&&String(cached?.configKey||"")===configKey&&Date.now()-(Number(cached?.fetchedAt)||0)<this.settings.refreshSeconds*1000;
+    if(!cacheFresh){this.meta=this.lastUsage?this.meta:"正在刷新…";await this.refresh();}
+    this.timer=setInterval(() => { this.now=Date.now(); },1000);
+  },
+  beforeUnmount() { if(this.timer)clearInterval(this.timer); },
+};
+</script>
+<script src="/_host/plugin-vue-runtime.js"></script>
+
+</body>
+</html>

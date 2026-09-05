@@ -1,15 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { PluginBundle } from "./types";
+import type { PluginDescriptor } from "./types";
 
 export type PluginRequestContext = {
   hidePopup?: () => Promise<void>;
 };
 
-function hasPermission(plugin: PluginBundle, permission: string) {
+function hasPermission(plugin: PluginDescriptor, permission: string) {
   return plugin.permissions.includes(permission);
 }
 
-function requirePermission(plugin: PluginBundle, permission: string) {
+function requirePermission(plugin: PluginDescriptor, permission: string) {
   if (!hasPermission(plugin, permission)) throw new Error(`插件缺少 ${permission} 权限`);
 }
 
@@ -50,10 +50,10 @@ async function storageClear(pluginId: string) {
 /**
  * 普通插件 Host API 只提供通用基础设施：网络、只读文件、插件私有存储。
  * system.metrics 是唯一的内置特殊能力，仅供 builtin/system-monitor 使用。
- * 其余业务逻辑与 WASM 均由插件自身负责。
+ * 其余业务逻辑由插件自身负责。
  */
 export async function handlePluginRequest(
-  plugin: PluginBundle,
+  plugin: PluginDescriptor,
   method: string,
   args: unknown[],
   context: PluginRequestContext = {},
@@ -95,6 +95,8 @@ export async function handlePluginRequest(
     // settings/popup 是插件容器生命周期控制，不承载业务能力。
     case "settings.open":
       return invoke("show_plugin_settings_window", { pluginId: plugin.id });
+    case "settings.close":
+      return invoke("hide_plugin_settings_window");
     case "popup.hide":
       if (context.hidePopup) await context.hidePopup();
       return null;

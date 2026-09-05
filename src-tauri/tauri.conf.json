@@ -43,7 +43,7 @@
         "minimizable": false,
         "closable": false,
         "decorations": false,
-        "shadow": true,
+        "shadow": false,
         "transparent": true,
         "visible": false,
         "focus": true,
@@ -69,8 +69,8 @@
         "visible": false,
         "focus": true,
         "focusable": true,
-        "alwaysOnTop": true,
-        "skipTaskbar": true
+        "alwaysOnTop": false,
+        "skipTaskbar": false
       },
       {
         "label": "settings",
@@ -79,6 +79,7 @@
         "width": 560,
         "height": 640,
         "minWidth": 480,
+        "minHeight": 420,
         "resizable": true,
         "maximizable": false,
         "minimizable": false,
@@ -89,9 +90,8 @@
         "visible": false,
         "focus": true,
         "focusable": true,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "minHeight": 420
+        "alwaysOnTop": false,
+        "skipTaskbar": false
       }
     ],
     "security": {
@@ -107,6 +107,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../plugins/": "plugins/"
+    }
   }
 }
